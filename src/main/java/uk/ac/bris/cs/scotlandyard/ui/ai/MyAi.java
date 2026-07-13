@@ -1,5 +1,6 @@
 package uk.ac.bris.cs.scotlandyard.ui.ai;
 
+import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Nonnull;
@@ -44,8 +45,28 @@ public final class MyAi implements Ai {
 	private Distances distances;
 	private Search search;
 
+	/**
+	 * The weight vector this instance plays with, and the source of its randomness.
+	 *
+	 * <p>
+	 * Mr X breaks ties between near-equal root moves at random, which is a strength fix
+	 * rather than a flourish: a deterministic Mr X is one whose next move the detectives
+	 * can simply <i>compute</i>, and determinism is what an inference engine eats. The
+	 * generator is per-instance, so the two brains in a mirror match do not share a
+	 * stream, and games run in parallel in the arena do not contend on one.
+	 */
+	private final EvalWeights weights;
+	private final Random rng;
+
 	/** Required: the game instantiates AIs reflectively, through the no-arg constructor. */
 	public MyAi() {
+		this(EvalWeights.fromSystemProperties());
+	}
+
+	/** For the arena and the tests: play with a named weight vector. */
+	public MyAi(EvalWeights weights) {
+		this.weights = weights;
+		this.rng = new Random();
 	}
 
 	@Nonnull
@@ -65,7 +86,8 @@ public final class MyAi implements Ai {
 	private Search prepare(Board board) {
 		if (this.search == null) {
 			this.distances = new Distances(board.getSetup().graph);
-			this.search = new Search(new Evaluator(this.distances), this.distances);
+			this.search = new Search(new Evaluator(this.distances, this.weights), this.distances,
+					this.weights, this.rng);
 		}
 		return this.search;
 	}
