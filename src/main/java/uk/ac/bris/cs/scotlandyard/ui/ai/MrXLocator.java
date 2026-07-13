@@ -4,6 +4,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.graph.ImmutableValueGraph;
 
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Optional;
@@ -11,6 +13,7 @@ import java.util.Set;
 
 import uk.ac.bris.cs.scotlandyard.model.Board;
 import uk.ac.bris.cs.scotlandyard.model.LogEntry;
+import uk.ac.bris.cs.scotlandyard.model.Move;
 import uk.ac.bris.cs.scotlandyard.model.Piece;
 import uk.ac.bris.cs.scotlandyard.model.ScotlandYard;
 import uk.ac.bris.cs.scotlandyard.model.ScotlandYard.Ticket;
@@ -318,6 +321,264 @@ public final class MrXLocator {
 			if (this.candidates.isEmpty()) this.candidates.addAll(this.graph.nodes());
 			this.consumed = 0;
 		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Ticket feasibility.
+	//
+	// Mr X's purse is bounded, so it is tempting to prune candidate paths that
+	// could not have been paid for. Two of the three obvious prunes are VACUOUS,
+	// and saying so is more useful than pretending otherwise:
+	//
+	// 1. A SECRET BUDGET PRUNE ON THE PAST IS VACUOUS. It would only bite if
+	//    different candidates were reached by paths spending different numbers of
+	//    secrets. They are not. LogEntry.ticket() names the exact ticket Mr X paid
+	//    for that entry, and the propagation branches only over WHERE an entry could
+	//    have taken him, never over WHICH ticket it was. So every surviving path
+	//    spends exactly the same multiset of tickets — the one the log spells out —
+	//    and no path can be told from another on cost. The ambiguity is spatial, not
+	//    monetary. (Corollary: his live SECRET count is 5 minus the number of SECRET
+	//    entries in the log, and carries no information the log did not already give.)
+	//
+	// 2. A DOUBLE BUDGET PRUNE ON THE PAST IS ALSO VACUOUS. MyGameStateFactory.
+	//    advanceMrX writes ONE LOG ENTRY PER LEG, each stamped with that leg's own
+	//    transport ticket; Ticket.DOUBLE never appears in the log at all (DoubleMove.
+	//    tickets() puts it last, past the legs the logger indexes). So a double move
+	//    is recorded as two ordinary entries, indistinguishable from two consecutive
+	//    single moves — and since the propagation walks the log one ENTRY at a time,
+	//    it already models the intermediate station correctly, with no special case.
+	//    Knowing which pairs of entries were doubles would tell us nothing extra about
+	//    position: two edges walked are two edges walked either way.
+	//
+	// 3. THE FERRY PRUNE IS REAL, AND ALREADY IN FORCE. Transport.FERRY.requiredTicket()
+	//    is SECRET, so servedBy() below can never match a ferry edge against a TAXI,
+	//    BUS or UNDERGROUND log entry: a candidate reached over a ferry on a non-secret
+	//    entry is already excluded. Nothing to add, but see TicketFeasibilityTest,
+	//    which pins it.
+	//
+	// What ticket counts DO buy is the FUTURE, and that is what the methods below are
+	// for. Mr X's SECRET and DOUBLE tickets are never replenished — MyGameStateFactory
+	// .build() forbids a detective from holding either, and advanceDetective's
+	// mrX.give(move.tickets()) can therefore only ever hand him TAXI, BUS or UNDERGROUND
+	// back. So SECRET and DOUBLE are a genuinely finite, monotonically shrinking budget,
+	// their live counts are readable from the Board, and once they hit zero the
+	// corresponding move simply cannot happen again. A forward model that still hedges
+	// over "he might go anywhere, it might be a secret" after his fifth secret is
+	// spending its search budget on branches the rules have already ruled out.
+	// ---------------------------------------------------------------------------
+
+	/**
+	 * How many SECRET tickets Mr X still holds — ground truth, read off the board.
+	 *
+	 * <p>
+	 * Never replenished: detectives are forbidden from holding a secret ticket, so
+	 * none can ever be handed back to him. This only ever falls.
+	 *
+	 * @param board the current board
+	 * @return his remaining secret tickets; on the (impossible) event that the board
+	 *         will not say, the exact figure implied by the log instead
+	 */
+	public static int remainingSecrets(Board board) {
+		Optional<Integer> held = heldByMrX(board, Ticket.SECRET);
+		if (held.isPresent())
+			return held.orElseThrow();
+		int spent = 0;
+		for (LogEntry entry : board.getMrXTravelLog()) {
+			if (entry.ticket() == Ticket.SECRET)
+				spent++;
+		}
+		int start = ScotlandYard.defaultMrXTickets().getOrDefault(Ticket.SECRET, 0);
+		return Math.max(0, start - spent);
+	}
+
+	/**
+	 * How many DOUBLE tickets Mr X still holds — ground truth, read off the board.
+	 *
+	 * <p>
+	 * Also never replenished. Unlike secrets this one cannot be recovered from the
+	 * log (a double move is logged as its two legs, and the DOUBLE ticket itself is
+	 * never written down), so if the board will not say we return the only sound
+	 * answer, the upper bound: assume he still has them all.
+	 *
+	 * @param board the current board
+	 * @return his remaining double tickets
+	 */
+	public static int remainingDoubles(Board board) {
+		return heldByMrX(board, Ticket.DOUBLE)
+				.orElseGet(() -> ScotlandYard.defaultMrXTickets().getOrDefault(Ticket.DOUBLE, 0));
+	}
+
+	/**
+	 * @param board the current board
+	 * @return whether a secret move is still possible for Mr X, ever again. When this
+	 *         is false, every remaining log entry names a real transport, and a
+	 *         forward model need no longer hedge over all edges — in particular, no
+	 *         ferry edge can be crossed for the rest of the game.
+	 */
+	public static boolean canStillPlaySecret(Board board) {
+		return remainingSecrets(board) > 0;
+	}
+
+	/**
+	 * @param board the current board
+	 * @return whether a double move is still possible for Mr X. False once he is out
+	 *         of double tickets, and also false near the end of the game: a double
+	 *         spans two rounds, so it needs two left in the log — the same test
+	 *         {@code MyGameStateFactory} applies.
+	 */
+	public static boolean canStillPlayDouble(Board board) {
+		return remainingDoubles(board) > 0
+				&& board.getMrXTravelLog().size() <= board.getSetup().rounds.size() - 2;
+	}
+
+	/**
+	 * Where Mr X could be standing after his <i>next</i> move — the candidate set
+	 * pushed one Mr X turn into the future, spending only tickets he actually holds.
+	 *
+	 * <p>
+	 * This is where ticket counts genuinely pay. A ticket-blind forward model expands
+	 * along every edge (because a secret ticket crosses every edge) and, if it is
+	 * careful, over two edges (because he might double). Both are conditional on a
+	 * purse the board shows us: once his secrets are gone, ferry edges are closed to
+	 * him outright and a "he could be anywhere adjacent" expansion is simply wrong;
+	 * once his doubles are gone, the two-step reach vanishes.
+	 *
+	 * <p>
+	 * Deliberately a <b>superset</b>: it does not remove stations the detectives
+	 * currently stand on. Detectives move before Mr X does, so today's occupancy is
+	 * not the occupancy his move will face, and subtracting it would be exactly the
+	 * unsound prune this class warns about everywhere else.
+	 *
+	 * @param board the current board
+	 * @return every station Mr X could occupy after one more move of his
+	 */
+	public static ImmutableSet<Integer> possibleNextLocations(Board board) {
+		return possibleNextLocations(board, possibleLocations(board));
+	}
+
+	/**
+	 * As {@link #possibleNextLocations(Board)}, but starting from a candidate set the
+	 * caller already holds — a {@link Belief}'s, say, which is tighter than the
+	 * stateless one.
+	 *
+	 * @param board      the current board
+	 * @param candidates where he could be standing now
+	 * @return every station he could occupy after one more move of his
+	 */
+	public static ImmutableSet<Integer> possibleNextLocations(Board board, Set<Integer> candidates) {
+		final ImmutableValueGraph<Integer, ImmutableSet<Transport>> graph = board.getSetup().graph;
+		final EnumMap<Ticket, Integer> purse = mrXPurse(board);
+		final boolean doubles = canStillPlayDouble(board);
+
+		Set<Integer> next = new LinkedHashSet<>();
+		for (int from : candidates) {
+			if (!graph.nodes().contains(from))
+				continue;
+			for (int first : graph.adjacentNodes(from)) {
+				for (Ticket paid : affordable(graph, purse, from, first)) {
+					next.add(first);
+					if (!doubles)
+						continue;
+					// Cost the second leg against the purse the first leg leaves behind: two
+					// secret legs in one double need two secrets, exactly as makeDoubleMoves
+					// insists.
+					purse.merge(paid, -1, Integer::sum);
+					for (int second : graph.adjacentNodes(first)) {
+						if (!affordable(graph, purse, first, second).isEmpty())
+							next.add(second);
+					}
+					purse.merge(paid, 1, Integer::sum);
+				}
+			}
+		}
+		return ImmutableSet.copyOf(next);
+	}
+
+	/**
+	 * The tickets Mr X could pay for edge {@code (a, b)} with, out of {@code purse}.
+	 * A secret ticket covers any edge he can hold one for; a ferry edge admits nothing
+	 * else, since {@link Transport#requiredTicket()} maps FERRY to SECRET.
+	 */
+	static Set<Ticket> affordable(ImmutableValueGraph<Integer, ImmutableSet<Transport>> graph,
+			EnumMap<Ticket, Integer> purse, int a, int b) {
+		final ImmutableSet<Transport> transports = graph.edgeValueOrDefault(a, b, ImmutableSet.of());
+		if (transports.isEmpty())
+			return EnumSet.noneOf(Ticket.class);
+		Set<Ticket> payable = EnumSet.noneOf(Ticket.class);
+		for (Transport t : transports) {
+			if (purse.getOrDefault(t.requiredTicket(), 0) > 0)
+				payable.add(t.requiredTicket());
+		}
+		if (purse.getOrDefault(Ticket.SECRET, 0) > 0)
+			payable.add(Ticket.SECRET);
+		return payable;
+	}
+
+	/**
+	 * The purse Mr X will have <i>by the time he next moves</i> — which is not simply
+	 * the purse he has now, and getting that wrong would make the forward set unsound.
+	 *
+	 * <p>
+	 * The detectives move before he does, and {@code advanceDetective} hands each
+	 * ticket a detective spends straight to Mr X. So his TAXI, BUS and UNDERGROUND
+	 * counts can still <i>grow</i> between this board and his turn: a zero we see now
+	 * is not a zero he will face, and pruning taxi edges on it would cut off a move he
+	 * really can make. We therefore credit him, up front, with every replenishable
+	 * ticket the detectives are still holding. That is an over-estimate, and an
+	 * over-estimate is the safe direction — it can only make the forward set larger.
+	 *
+	 * <p>
+	 * SECRET and DOUBLE need no such allowance, and this is the whole reason the
+	 * pruning works: {@code MyGameStateFactory.build} forbids a detective from holding
+	 * either, so no detective can ever hand one over. Those two counts are exact, they
+	 * only ever fall, and they are the only tickets it is sound to prune on.
+	 *
+	 * <p>
+	 * If the board declines to show a count at all — it never does in this model, but
+	 * the {@link Board} contract permits it — assume he can afford anything.
+	 */
+	static EnumMap<Ticket, Integer> mrXPurse(Board board) {
+		final EnumMap<Ticket, Integer> purse = new EnumMap<>(Ticket.class);
+		final Optional<Board.TicketBoard> tickets = board.getPlayerTickets(Piece.MrX.MRX);
+		for (Ticket ticket : Ticket.values()) {
+			purse.put(ticket, tickets.map(t -> t.getCount(ticket)).orElse(Integer.MAX_VALUE));
+		}
+		// If it is already Mr X's turn, no detective moves before him, so nothing can be
+		// handed over and the counts we can see are exactly the counts he will spend.
+		if (mrXToMove(board))
+			return purse;
+		for (Ticket ticket : ScotlandYard.DETECTIVE_TICKETS) {
+			final int held = purse.getOrDefault(ticket, 0);
+			if (held == Integer.MAX_VALUE)
+				continue;
+			purse.put(ticket, held + heldByDetectives(board, ticket));
+		}
+		return purse;
+	}
+
+	/** @return whether the board is waiting on Mr X, so that no detective moves before he does. */
+	private static boolean mrXToMove(Board board) {
+		final ImmutableSet<Move> moves = board.getAvailableMoves();
+		return !moves.isEmpty() && moves.iterator().next().commencedBy().isMrX();
+	}
+
+	/** @return how many of {@code ticket} the detectives hold between them, and could yet give him. */
+	private static int heldByDetectives(Board board, Ticket ticket) {
+		int total = 0;
+		for (Piece piece : board.getPlayers()) {
+			if (!piece.isDetective())
+				continue;
+			final Optional<Board.TicketBoard> tickets = board.getPlayerTickets(piece);
+			if (tickets.isEmpty())
+				return Integer.MAX_VALUE / 2;
+			total += tickets.orElseThrow().getCount(ticket);
+		}
+		return total;
+	}
+
+	/** @return how many of {@code ticket} Mr X holds, if the board will say. */
+	private static Optional<Integer> heldByMrX(Board board, Ticket ticket) {
+		return board.getPlayerTickets(Piece.MrX.MRX).map(t -> t.getCount(ticket));
 	}
 
 	private MrXLocator() {

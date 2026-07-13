@@ -4,6 +4,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.graph.ImmutableValueGraph;
 
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -165,6 +166,89 @@ public final class Suspicion {
 			}
 		}
 		return occupied;
+	}
+
+	/**
+	 * The distribution pushed one Mr X turn into the <i>future</i>, spending only the
+	 * tickets he actually holds — where he will be standing when the detectives next
+	 * get to look at him, which is the thing a detective actually wants to intercept.
+	 *
+	 * <p>
+	 * This is where his ticket counts earn their keep, and the only place they do.
+	 * Pruning the <i>past</i> on a ticket budget is vacuous — the log names the exact
+	 * ticket paid for every entry, so every log-consistent path spends the same
+	 * tickets and none can be told from another on cost (see the long note in
+	 * {@link MrXLocator}). The future is a different matter: his SECRET and DOUBLE
+	 * tickets are never replenished, their live counts are on the board, and once they
+	 * run out those moves are gone for good. With no secrets left he cannot cross a
+	 * ferry edge and cannot move except along a transport he holds the ticket for;
+	 * with no doubles left he cannot reach two stations away. A forward model that
+	 * ignores this spreads mass over moves the rules forbid.
+	 *
+	 * <p>
+	 * The mass model is the one this class already assumes: Mr X picks <b>uniformly
+	 * among his legal moves</b>. Legal here mirrors {@code MyGameStateFactory}: one
+	 * move per transport-ticket he holds for each incident edge, plus a secret move
+	 * over any edge if he holds a secret, plus every two-leg combination if he holds a
+	 * double and the log has two rounds left — with the second leg costed against the
+	 * purse the first leg leaves behind. Note this weights <i>destinations by how many
+	 * ways there are to reach them</i>: a station he can get to by taxi, by bus and by
+	 * secret is three of his options, not one, and is correspondingly likelier.
+	 *
+	 * <p>
+	 * Detective-occupied stations are <b>not</b> removed. The detectives move before he
+	 * does, so where they stand now is not where they will stand when he chooses; the
+	 * support is deliberately a superset, for the same reason the rest of this class
+	 * prunes occupancy only at the very end.
+	 *
+	 * @param board the current board, as the detectives see it
+	 * @return station -&gt; likelihood Mr X is standing there after his next move,
+	 *         summing to 1.0. Never empty.
+	 */
+	public static Map<Integer, Double> nextLikelihoods(Board board) {
+		final ImmutableValueGraph<Integer, ImmutableSet<Transport>> graph = board.getSetup().graph;
+		final Map<Integer, Double> now = likelihoods(board);
+		final EnumMap<Ticket, Integer> purse = MrXLocator.mrXPurse(board);
+		final boolean doubles = MrXLocator.canStillPlayDouble(board);
+
+		final Map<Integer, Double> next = new LinkedHashMap<>();
+		for (Map.Entry<Integer, Double> entry : now.entrySet()) {
+			final int from = entry.getKey();
+			if (!graph.nodes().contains(from)) continue;
+
+			// Enumerate his legal moves as destinations-with-multiplicity: one slot per
+			// (ticket, destination) for a single, one per (ticket, mid, ticket, end) for a
+			// double. Counting first, then dividing, keeps every option equally weighted.
+			final Map<Integer, Integer> ways = new LinkedHashMap<>();
+			int options = 0;
+			for (int first : graph.adjacentNodes(from)) {
+				for (Ticket paid : MrXLocator.affordable(graph, purse, from, first)) {
+					ways.merge(first, 1, Integer::sum);
+					options++;
+					if (!doubles) continue;
+					purse.merge(paid, -1, Integer::sum);
+					for (int second : graph.adjacentNodes(first)) {
+						final int legs = MrXLocator.affordable(graph, purse, first, second).size();
+						if (legs > 0) {
+							ways.merge(second, legs, Integer::sum);
+							options += legs;
+						}
+					}
+					purse.merge(paid, 1, Integer::sum);
+				}
+			}
+			if (options == 0) continue;
+
+			final double share = entry.getValue() / options;
+			for (Map.Entry<Integer, Integer> way : ways.entrySet()) {
+				next.merge(way.getKey(), share * way.getValue(), Double::sum);
+			}
+		}
+
+		// He is boxed in everywhere, or the board would not show us his tickets. Rather
+		// than hand back nothing, stand still: the present is the honest answer.
+		if (next.isEmpty()) return now;
+		return normalise(next);
 	}
 
 	/**
