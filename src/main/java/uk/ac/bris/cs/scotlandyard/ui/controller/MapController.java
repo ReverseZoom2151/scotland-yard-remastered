@@ -10,6 +10,7 @@ import net.kurobako.gesturefx.GesturePane;
 import net.kurobako.gesturefx.GesturePane.FitMode;
 import net.kurobako.gesturefx.GesturePane.ScrollBarPolicy;
 
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -31,13 +32,15 @@ import io.atlassian.fugue.Option;
 import io.atlassian.fugue.Unit;
 import javafx.animation.Interpolator;
 import javafx.application.Platform;
+import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.SimpleBooleanProperty;
 import javafx.fxml.FXML;
 import javafx.geometry.Insets;
 import javafx.geometry.Point2D;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Parent;
-import javafx.scene.control.CheckBox;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.effect.BlendMode;
 import javafx.scene.image.Image;
@@ -78,6 +81,8 @@ import uk.ac.bris.cs.scotlandyard.ui.Utils;
 import uk.ac.bris.cs.scotlandyard.ui.controller.NotificationController.NotificationBuilder;
 import uk.ac.bris.cs.scotlandyard.ui.model.BoardViewProperty;
 import uk.ac.bris.cs.scotlandyard.ui.model.ModelProperty;
+import uk.ac.bris.cs.scotlandyard.ui.privacy.PrivateMoveChannel;
+import uk.ac.bris.cs.scotlandyard.ui.privacy.PrivateMovePane;
 
 import static io.atlassian.fugue.Option.none;
 import static io.atlassian.fugue.Option.some;
@@ -117,15 +122,13 @@ final class MapController implements Controller, GameControl {
 	private final Pane overlay;
 	/** Un-blended layer for text: percentages, scores, the legend keys. */
 	private final Pane annotations;
-	/** Floating toggle box, so the overlays are reachable without touching the View menu. */
-	private final VBox controls;
 	/**
-	 * What {@link #root()} hands out: the gesture pane with the toggle box floating over
-	 * it. Assigned late, and deliberately: {@code Controller.bind} calls {@code root()}
-	 * while loading the FXML and feeds the result to {@code FXMLLoader.setRoot}, which
-	 * throws "Root value already specified" if it is given anything but null. The
-	 * original code got away with this by leaving {@code gesturePane} null at that
-	 * point; this field must stay null there for the same reason.
+	 * What {@link #root()} hands out. Assigned late, and deliberately:
+	 * {@code Controller.bind} calls {@code root()} while loading the FXML and feeds the
+	 * result to {@code FXMLLoader.setRoot}, which throws "Root value already specified"
+	 * if it is given anything but null. The original code got away with this by leaving
+	 * {@code gesturePane} null at that point; this field must stay null there for the
+	 * same reason.
 	 */
 	private StackPane rootStack;
 
@@ -161,13 +164,10 @@ final class MapController implements Controller, GameControl {
 		annotations.setMouseTransparent(true);
 		root.getChildren().add(annotations);
 
-		controls = buildControls();
-
 		gesturePane = new GesturePane(pane);
-		// The View menu lives in Game.fxml/BaseGameController, which this feature does not
-		// own, so the overlay switches ride along with the map itself: a box pinned over
-		// the viewport, outside the zoomable content.
-		rootStack = new StackPane(gesturePane, controls);
+		// The overlay switches live in the View menu (see BaseGameController); nothing
+		// floats over the map any more.
+		rootStack = new StackPane(gesturePane);
 		rootStack.setPickOnBounds(false);
 		gesturePane.setScrollBarPolicy(ScrollBarPolicy.NEVER);
 		gesturePane.setClipEnabled(false);
@@ -200,35 +200,6 @@ final class MapController implements Controller, GameControl {
 		Platform.runLater(() -> gesturePane.zoomTo(0, Point2D.ZERO));
 	}
 
-	/** The floating overlay switchboard, pinned to the top-left of the viewport. */
-	private VBox buildControls() {
-		VBox box = new VBox(4);
-		box.setPadding(new Insets(10));
-		box.setPickOnBounds(false);
-		box.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
-		box.setStyle("-fx-background-color: rgba(20,20,26,0.72); -fx-background-radius: 6;");
-		box.getChildren().add(styled(new Label("Overlays")));
-		box.getChildren().add(toggle("Suspicion (where is Mr X?)", view.suspicionProperty()));
-		box.getChildren().add(toggle("Ambiguity (2-hop reach)", view.ambiguityProperty()));
-		box.getChildren().add(toggle("AI explain", view.aiExplainProperty()));
-		StackPane.setAlignment(box, Pos.TOP_LEFT);
-		StackPane.setMargin(box, new Insets(12));
-		return box;
-	}
-
-	private static Label styled(Label label) {
-		label.setStyle("-fx-text-fill: white; -fx-font-weight: bold;");
-		return label;
-	}
-
-	private static CheckBox toggle(String text, javafx.beans.property.BooleanProperty property) {
-		CheckBox box = new CheckBox(text);
-		box.setStyle("-fx-text-fill: white;");
-		box.setSelected(property.get());
-		box.selectedProperty().bindBidirectional(property);
-		return box;
-	}
-
 	private static void lockSize(double width, double height, Region... regions) {
 		for (Region region : regions) {
 			region.setPrefSize(width, height);
@@ -246,10 +217,38 @@ final class MapController implements Controller, GameControl {
 	private Option<Ai> mrXAi = none();
 	private Option<Ai> detectiveAi = none();
 
+	// ------------------------------------------------- hot-seat private Mr X moves
+
+	/** Opt-in, off by default; bound to a View menu item by {@link BaseGameController}. */
+	private final BooleanProperty privateMrXMoves = new SimpleBooleanProperty(false);
+	/** One per game, so the letter mapping reshuffles on every offer. */
+	private PrivateMoveChannel privateChannel;
+	/** How to put a node over the game, and how to take it away again; may be null. */
+	private Consumer<Node> overlayShow;
+	private Runnable overlayHide;
+	/** Whether the overlay currently showing is ours, so we never hide somebody else's. */
+	private boolean privateOverlayShowing;
+
+	BooleanProperty privateMrXMovesProperty() {
+		return privateMrXMoves;
+	}
+
+	/**
+	 * Hands the map a way to show the private-move pane over the game. Both arguments
+	 * may be null, in which case the private-move flow simply never engages and the
+	 * normal click-the-map flow is untouched.
+	 */
+	void privateMoveOverlay(Consumer<Node> show, Runnable hide) {
+		this.overlayShow = show;
+		this.overlayHide = hide;
+	}
+
 	@Override
 	public void onGameAttach(
 			Model model, ModelProperty config, Consumer<ImmutableSet<Piece>> timeout) {
 		this.model = model;
+		hidePrivateOverlay();
+		privateChannel = new PrivateMoveChannel(new SecureRandom().nextLong());
 		this.config = requireNonNull(config);
 		this.timeout = requireNonNull(timeout);
 		unlock();
@@ -293,8 +292,15 @@ final class MapController implements Controller, GameControl {
 
 	@Override
 	public void onGameDetached() {
-		clearMoveHints();
+		hidePrivateOverlay();
 		lock();
+		// The controller is detached on application stop whether or not a game was ever
+		// attached (quitting from the setup screen does exactly that). With no game there
+		// is no executor, no ai and no hint to clear, and dereferencing the executor here
+		// is what used to make Application.stop throw.
+		if (aiExecutor == null)
+			return;
+		clearMoveHints();
 		runInContainment(() -> {
 			mrXAi.forEach(Ai::onTerminate);
 			detectiveAi.forEach(Ai::onTerminate);
@@ -400,8 +406,11 @@ final class MapController implements Controller, GameControl {
 			terminateAction = requestAi(board, detectiveAi.get());
 		} else {
 			overlayAi = none();
-			terminateAction = requestHuman(
-					board.getCurrentBoard().getAvailableMoves(), m -> selectAndMove(model, m));
+			terminateAction = requestHuman(moves, m -> selectAndMove(model, m));
+			// A human Mr X on a shared screen: offer the private (QR) flow on top of the
+			// normal one, never instead of it, so a failure here can never strand the turn.
+			if (mrX)
+				offerPrivateMove(board, moves);
 		}
 
 		// The overlays describe the board as it now stands, whoever is to move.
@@ -459,6 +468,76 @@ final class MapController implements Controller, GameControl {
 			}
 		});
 
+	}
+
+	/**
+	 * Shows the hot-seat privacy pane for a human Mr X: a QR code of a shuffled,
+	 * padded {@code LETTER -> destination} table plus a dropdown of letters, so the
+	 * detectives sitting next to him see him pick "K" and learn nothing.
+	 *
+	 * <p>
+	 * Strictly additive: the move hints are already on the map underneath, and the
+	 * pane can be dismissed to fall back to them, so no path through here can leave a
+	 * turn unplayable.
+	 */
+	private void offerPrivateMove(Model board, ImmutableSet<Move> moves) {
+		if (!privateMrXMoves.get() || overlayShow == null || privateChannel == null
+				|| moves.isEmpty())
+			return;
+		final VBox box;
+		try {
+			var offer = privateChannel.offer(moves);
+			PrivateMovePane pane = new PrivateMovePane(offer, move -> {
+				hidePrivateOverlay();
+				selectAndMove(board, move);
+			});
+			Button dismiss = new Button("Dismiss (play on the map instead)");
+			dismiss.setOnAction(e -> hidePrivateOverlay());
+			box = new VBox(8, pane, dismiss);
+			box.setAlignment(Pos.CENTER);
+			box.setPadding(new Insets(16));
+			box.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+			box.setStyle("-fx-background-color: white; -fx-background-radius: 8;");
+		} catch (RuntimeException e) {
+			// e.g. a payload no QR code could hold; the map hints still stand, so the
+			// turn simply proceeds without the privacy pane
+			notifications.show("notify_private_move",
+					new NotificationBuilder("Private Mr X move unavailable, play on the map")
+							.create());
+			return;
+		}
+		privateOverlayShowing = true;
+		overlayShow.accept(box);
+	}
+
+	private void hidePrivateOverlay() {
+		if (!privateOverlayShowing)
+			return;
+		privateOverlayShowing = false;
+		if (overlayHide != null)
+			overlayHide.run();
+	}
+
+	/**
+	 * Draws the counters at the given locations without touching the model: the replay
+	 * scrubber's only handle on the map. Move input is disabled for as long as the map
+	 * is showing a snapshot; {@link #unlock()} puts it back.
+	 *
+	 * @param locations where each piece stood; pieces absent from the map are left be
+	 * @param showMrX   whether Mr X's counter should be drawn at all
+	 */
+	void showSnapshot(Map<Piece, Integer> locations, boolean showMrX) {
+		lock();
+		locations.forEach((piece, location) -> {
+			CounterController counter = counters.get(piece);
+			if (counter == null || location == null || location <= 0)
+				return;
+			counter.location(location);
+			counter.updateLocation();
+		});
+		CounterController mrX = counters.get(MRX);
+		if (mrX != null)
+			mrX.animateVisibility(showMrX);
 	}
 
 	@Override

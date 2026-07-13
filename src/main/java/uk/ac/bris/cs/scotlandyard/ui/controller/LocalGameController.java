@@ -10,7 +10,9 @@ import java.net.URL;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.ResourceBundle;
 import java.util.stream.Collectors;
@@ -18,12 +20,19 @@ import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 
 import javafx.application.Platform;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Alert.AlertType;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.Slider;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.stage.FileChooser;
 import javafx.stage.FileChooser.ExtensionFilter;
 import javafx.stage.Stage;
@@ -34,6 +43,7 @@ import uk.ac.bris.cs.scotlandyard.model.Board.GameState;
 import uk.ac.bris.cs.scotlandyard.model.GameSetup;
 import uk.ac.bris.cs.scotlandyard.model.Model;
 import uk.ac.bris.cs.scotlandyard.model.Model.Observer;
+import uk.ac.bris.cs.scotlandyard.model.Model.Observer.Event;
 import uk.ac.bris.cs.scotlandyard.model.Move;
 import uk.ac.bris.cs.scotlandyard.model.Move.FunctionalVisitor;
 import uk.ac.bris.cs.scotlandyard.model.MyModelFactory;
@@ -109,10 +119,123 @@ public final class LocalGameController extends BaseGameController {
 		addMenuItem(save);
 		addMenuItem(reset);
 		addMenuItem(newGame);
+		addStatusNode(buildScrubber());
 		setupGame();
 	}
 
+	// --- replay scrubber
+	// ---------------------------------------------------------------
+
+	/**
+	 * The post-mortem replay bar. It is deliberately <em>only</em> live once the game
+	 * is over: scrubbing a running game would have to race the AI executor (which
+	 * animates counters from a Platform.runLater the scrubber cannot see coming) and
+	 * would show the detectives exactly where Mr X has been. A finished game has no
+	 * observers left, no AI thinking and nothing left to hide, so walking it is safe.
+	 */
+	// NOTE: assigned in buildScrubber(), not at the declaration. Controller.bind runs
+	// initialize() from the superclass constructor, i.e. before this class's field
+	// initializers, so anything initialized here would still be null in initialize().
+	private HBox scrubBar;
+	private Slider scrubSlider;
+	private Label scrubLabel;
+
+	private HBox buildScrubber() {
+		scrubBar = new HBox(6);
+		scrubSlider = new Slider(0, 0, 0);
+		scrubLabel = new Label("Replay available once the game is over");
+		Button first = new Button("|<");
+		Button previous = new Button("<");
+		Button next = new Button(">");
+		Button last = new Button(">|");
+		first.setOnAction(e -> scrubTo(0));
+		previous.setOnAction(e -> scrubTo((int) scrubSlider.getValue() - 1));
+		next.setOnAction(e -> scrubTo((int) scrubSlider.getValue() + 1));
+		last.setOnAction(e -> scrubTo((int) scrubSlider.getMax()));
+
+		scrubSlider.setBlockIncrement(1);
+		scrubSlider.setMajorTickUnit(1);
+		scrubSlider.setMinorTickCount(0);
+		scrubSlider.setSnapToTicks(true);
+		HBox.setHgrow(scrubSlider, Priority.ALWAYS);
+		scrubSlider.valueProperty().addListener((o, was, is) -> {
+			// programmatic updates happen while the bar is disabled; ignore those
+			if (!scrubBar.isDisabled())
+				renderHistoryState((int) Math.round(is.doubleValue()));
+		});
+
+		scrubBar.setAlignment(Pos.CENTER_LEFT);
+		scrubBar.setPadding(new Insets(4, 8, 4, 8));
+		scrubBar.getChildren().addAll(new Label("Replay:"), first, previous, next, last,
+				scrubSlider, scrubLabel);
+		scrubBar.setDisable(true);
+		return scrubBar;
+	}
+
+	/** Moves the scrubber, which moves the slider, which redraws the board. */
+	private void scrubTo(int index) {
+		if (scrubBar == null || scrubBar.isDisabled())
+			return;
+		int clamped = Math.max(0, Math.min(index, (int) scrubSlider.getMax()));
+		if ((int) Math.round(scrubSlider.getValue()) == clamped) {
+			renderHistoryState(clamped); // slider will not fire, so redraw by hand
+		} else {
+			scrubSlider.setValue(clamped);
+		}
+	}
+
+	/** Turns the scrubber off (a game is starting) or on (a game has just ended). */
+	private void refreshScrubber(boolean enabled) {
+		if (scrubBar == null)
+			return;
+		GameSession current = session;
+		boolean usable = enabled && current != null && current.history.cursorIndex() > 0;
+		scrubBar.setDisable(true);
+		if (!usable) {
+			scrubSlider.setMax(0);
+			scrubSlider.setValue(0);
+			scrubLabel.setText("Replay available once the game is over");
+			return;
+		}
+		int end = current.history.cursorIndex();
+		scrubSlider.setMax(end);
+		scrubSlider.setValue(end);
+		scrubLabel.setText("Move " + end + " of " + end);
+		scrubBar.setDisable(false);
+	}
+
+	/**
+	 * Draws the board as it stood after {@code index} moves. Read-only throughout: the
+	 * model is never advanced, no observer is notified and no AI is woken; the views
+	 * are simply handed a historical {@link GameState} to render.
+	 */
+	private void renderHistoryState(int index) {
+		GameSession current = session;
+		if (current == null)
+			return;
+		History history = current.history;
+		int end = history.cursorIndex();
+		int i = Math.max(0, Math.min(index, end));
+		GameState state = history.stateAt(i);
+
+		Map<Piece, Integer> locations = new HashMap<>();
+		for (Player detective : current.detectives) {
+			if (detective.piece() instanceof Piece.Detective piece) {
+				state.getDetectiveLocation(piece)
+						.ifPresent(location -> locations.put(piece, location));
+			}
+		}
+		locations.put(current.mrX.piece(), mrXLocationAfter(current.mrX.location(),
+				ImmutableList.copyOf(history.movesToCurrent().subList(0, i))));
+
+		map.showSnapshot(locations, true);
+		travelLog.onModelChanged(state, Event.MOVE_MADE);
+		ticketBoard.onModelChanged(state, Event.MOVE_MADE);
+		scrubLabel.setText("Move " + i + " of " + end);
+	}
+
 	private void setupGame() {
+		refreshScrubber(false);
 		var startScreen = new LocalSetupController(resourceManager, config,
 				ModelProperty.createDefault(resourceManager),
 				ResourceManager.scanAis(),
@@ -126,6 +249,8 @@ public final class LocalGameController extends BaseGameController {
 		controls.forEach(GameControl::onGameDetached);
 		controls.forEach(model::unregisterObserver);
 		map.lock();
+		// nothing is observing the model any more, so the replay is now safe to walk
+		refreshScrubber(true);
 		notifications.dismissAll();
 		notifications.show("notify_gameover",
 				new NotificationBuilder(
@@ -306,6 +431,7 @@ public final class LocalGameController extends BaseGameController {
 		hideOverlay();
 		try {
 			detachCurrentGame();
+			refreshScrubber(false);
 			GameRecord.Replay replay = record.replay();
 			GameSetup gameSetup = record.setup();
 			Player mrX = record.mrX();

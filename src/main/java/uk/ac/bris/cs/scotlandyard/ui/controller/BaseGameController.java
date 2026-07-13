@@ -81,6 +81,18 @@ abstract class BaseGameController implements Controller {
 	@FXML
 	private CheckMenuItem animationToggle;
 
+	/** The analysis overlays drawn by {@link MapController}. */
+	@FXML
+	private CheckMenuItem suspicionToggle;
+	@FXML
+	private CheckMenuItem ambiguityToggle;
+	@FXML
+	private CheckMenuItem aiExplainToggle;
+
+	/** Hot-seat privacy: a human Mr X picks his move from a QR-coded letter table. */
+	@FXML
+	private CheckMenuItem privateMoveToggle;
+
 	@FXML
 	private AnchorPane gamePane;
 	@FXML
@@ -187,6 +199,14 @@ abstract class BaseGameController implements Controller {
 		setAndBind(config.animationProperty(), animationToggle.selectedProperty());
 		setAndBind(config.historyProperty(), historyToggle.selectedProperty());
 		setAndBind(config.focusPlayerProperty(), focusToggle.selectedProperty());
+		setAndBind(config.suspicionProperty(), suspicionToggle.selectedProperty());
+		setAndBind(config.ambiguityProperty(), ambiguityToggle.selectedProperty());
+		setAndBind(config.aiExplainProperty(), aiExplainToggle.selectedProperty());
+		setAndBind(map.privateMrXMovesProperty(), privateMoveToggle.selectedProperty());
+
+		// the map has no window of its own, so it borrows the game overlay to show the
+		// private-move pane
+		map.privateMoveOverlay(this::showOverlay, this::hideOverlay);
 
 		// what a pain
 		scrollToggle.setSelected(config.getScrollMode() == ScrollMode.ZOOM);

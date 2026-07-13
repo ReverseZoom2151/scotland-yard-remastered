@@ -61,6 +61,16 @@
                             selected="true" text="Animations" />
                         <CheckMenuItem fx:id="scrollToggle" mnemonicParsing="false"
                             text="Scroll as zoom" />
+                        <SeparatorMenuItem mnemonicParsing="false" />
+                        <CheckMenuItem fx:id="suspicionToggle" mnemonicParsing="false"
+                            text="Suspicion (where Mr X might be)" />
+                        <CheckMenuItem fx:id="ambiguityToggle" mnemonicParsing="false"
+                            text="Ambiguity (best hiding spots)" />
+                        <CheckMenuItem fx:id="aiExplainToggle" mnemonicParsing="false"
+                            text="Explain AI" />
+                        <SeparatorMenuItem mnemonicParsing="false" />
+                        <CheckMenuItem fx:id="privateMoveToggle" mnemonicParsing="false"
+                            text="Private Mr X moves (QR)" />
                     </items>
                 </Menu>
                 <Menu mnemonicParsing="false" text="Help">
