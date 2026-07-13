@@ -34,15 +34,15 @@ public final class MyGameStateFactory implements Factory<GameState> {
 			this.log = log;
 			this.mrX = mrX;
 			this.detectives = detectives;
-			this.winner = ImmutableSet.of();
-			this.moves = getAvailableMoves();
-			this.winner = getWinner();
+			locationOverlap();
+			duplicateColour();
 			this.everyone = ImmutableList.<Player>builder()
 					.addAll(detectives)
 					.add(mrX)
 					.build();
-			locationOverlap();
-			duplicateColour();
+			this.winner = ImmutableSet.of();
+			this.moves = getAvailableMoves();
+			this.winner = getWinner();
 		}
 
 		private void locationOverlap() {
@@ -163,15 +163,15 @@ public final class MyGameStateFactory implements Factory<GameState> {
 				@Override
 				public List<Integer> visit(Move.SingleMove singleMove) {
 					List<Integer> finalDestination = new ArrayList<>();
-					finalDestination.add(singleMove.primaryDestination);
+					finalDestination.add(singleMove.destination);
 					return finalDestination;
 				}
 
 				@Override
 				public List<Integer> visit(Move.DoubleMove doubleMove) {
 					List<Integer> finalDestination = new ArrayList<>();
-					finalDestination.add(doubleMove.primaryDestination);
-					finalDestination.add(doubleMove.secondaryDestination);
+					finalDestination.add(doubleMove.destination1);
+					finalDestination.add(doubleMove.destination2);
 					return finalDestination;
 				}
 			});
@@ -317,14 +317,14 @@ public final class MyGameStateFactory implements Factory<GameState> {
 		Set<Move.SingleMove> x = makeSingleMoves(setup, player, source, detectives);
 		Set<Move.DoubleMove> doubleMoves = new HashSet<>();
 		for (Move.SingleMove primaryMove : x) {
-			Set<Move.SingleMove> y = makeSingleMoves(setup, player, primaryMove.primaryDestination, detectives);
+			Set<Move.SingleMove> y = makeSingleMoves(setup, player, primaryMove.destination, detectives);
 			ScotlandYard.Ticket theFirstTicket = primaryMove.ticket;
 			for (Move.SingleMove secondaryMove : y) {
 				if ((secondaryMove.ticket == theFirstTicket) && (player.hasAtLeast(theFirstTicket, 2) == false)) {
 					continue;
 				}
 				Move.DoubleMove ticket = new Move.DoubleMove(player.piece(), source, primaryMove.ticket,
-						primaryMove.primaryDestination, secondaryMove.ticket, secondaryMove.primaryDestination);
+						primaryMove.destination, secondaryMove.ticket, secondaryMove.destination);
 				doubleMoves.add(ticket);
 			}
 		}

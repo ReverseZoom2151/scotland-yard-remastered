@@ -107,7 +107,6 @@ public interface Move extends Serializable {
 		 * The destination
 		 */
 		public final int destination;
-        protected Integer primaryDestination;
 
 		public SingleMove(@Nonnull Piece piece, int source,
 				@Nonnull Ticket ticket, int destination) {
@@ -184,8 +183,6 @@ public interface Move extends Serializable {
 		 * The second destination
 		 */
 		public final int destination2;
-        protected Integer secondaryDestination;
-        protected Integer primaryDestination;
 
 		public DoubleMove(@Nonnull Piece piece, int source,
 				@Nonnull Ticket ticket1, int destination1,
