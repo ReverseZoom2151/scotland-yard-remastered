@@ -1,22 +1,53 @@
-<h1 align="center">Scotland Yard</h1>
+<h1 align="center">Scotland Yard Remastered</h1>
 
 <p align="center">
-A Java implementation of the Scotland Yard board game, played on the real 199-station
-London map. Five detectives hunt Mr X across the city. Mr X moves in secret, surfacing
-only on the reveal rounds.
+Five detectives hunt Mr X across the 199 stations of the London Underground. He moves in
+secret, surfacing only on the reveal rounds. The rest of the time all anyone knows is which
+kind of ticket he spent.
+</p>
+
+<p align="center">
+<b>That ticket is the whole game, and it is the whole point of this repository.</b>
 </p>
 
 <p align="center">
   <img src="docs/screenshot.png" alt="Scotland Yard" width="900">
 </p>
 
+## About
+
+A taxi ticket can only have carried Mr X down a taxi edge. So the travel log, which records
+the *kind* of ticket he spent but not the station, quietly constrains where he can be. Seed
+that at his last reveal, expand it once per logged ticket, and you get the set of stations he
+could be standing on right now. A secret ticket crosses any edge, so it tells you nothing,
+which is exactly what makes it worth holding.
+
+This repository is built around that idea. The AI is never handed Mr X's position: `Board` has
+no `getMrXLocation()`, so the detective side has to work it out, and Mr X in turn has to reason
+about what they can work out. The same inference is painted on the board as a heatmap, so a
+human detective can see the net closing too.
+
+The game itself is a University of Bristol coursework framework. It arrived throwing a
+`NullPointerException` on game creation, so nothing ran at all. What grew out of fixing that:
+
+- an alpha-beta AI with iterative deepening, playing both sides
+- a **headless arena** that plays AI against AI in parallel and reports win rates, because
+  otherwise every claim about AI strength is just an opinion
+- a **suspicion overlay** rendering the detectives' belief about Mr X, live
+- save, load, replay and undo, which are all the same fold over an immutable model
+- a **QR private-move channel**, so Mr X can take his turn on a shared screen without the
+  detectives reading it over his shoulder
+
+199 tests. The AI catches a random Mr X in every game it plays. Mr X himself is still the
+weaker half, and the README says so below rather than pretending otherwise.
+
 ## Running it
 
 Requires JDK 17. Maven is not needed, because the wrapper fetches it.
 
 ```bash
-./mvnw test                            # 85 tests
-./mvnw exec:java                       # launch the game
+./mvnw test                            # 199 tests
+./mvnw exec:java@game                  # launch the game
 ```
 
 On Windows use `mvnw.cmd`. If Maven reports `JAVA_HOME not found`, point it at your JDK:
