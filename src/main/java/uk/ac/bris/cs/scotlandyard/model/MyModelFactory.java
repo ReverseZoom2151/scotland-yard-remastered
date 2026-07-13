@@ -1,80 +1,75 @@
 package uk.ac.bris.cs.scotlandyard.model;
 
 import com.google.common.collect.ImmutableList;
-import javax.annotation.Nonnull;
 import com.google.common.collect.ImmutableSet;
 
 import uk.ac.bris.cs.scotlandyard.model.ScotlandYard.Factory;
 
-import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.Objects;
 import java.util.Set;
 
-/**
- * cw-model
- * Stage 2: Complete this class
- */
+import javax.annotation.Nonnull;
 
+/**
+ * Builds the observable {@link Model} that the UI and the AI players drive.
+ */
 public final class MyModelFactory implements Factory<Model> {
+
 	@Nonnull
 	@Override
 	public Model build(GameSetup setup, Player mrX, ImmutableList<Player> detectives) {
-		Set<Model.Observer> observerSet = new HashSet<>();
-		MyGameStateFactory theGame = new MyGameStateFactory();
-		Board.GameState gameState = theGame.build(setup, mrX, detectives);
-		Model model = new Model() {
-			Board.GameState modelState = gameState;
+		return new MyModel(new MyGameStateFactory().build(setup, mrX, detectives));
+	}
 
-			@Nonnull
-			@Override
-			public Board getCurrentBoard() {
-				return this.modelState;
-			}
+	private static final class MyModel implements Model {
 
-			@Override
-			public void registerObserver(@Nonnull Observer observer) {
-				if (observer.equals(null)) {
-					throw new NullPointerException("Observer cannot be null!");
-				}
-				for (Observer s : observerSet) {
-					if (s.equals(observer)) {
-						throw new IllegalArgumentException("Duplicate observer!");
-					}
-				}
-				observerSet.add(observer);
-			}
+		// Insertion-ordered so observers are notified in the order they registered.
+		private final Set<Observer> observers = new LinkedHashSet<>();
+		private Board.GameState state;
 
-			@Override
-			public void unregisterObserver(@Nonnull Observer observer) {
-				if (observer.equals(null)) {
-					throw new NullPointerException("Observer cannot be null!");
-				}
-				if (observerSet.contains(observer) == true) {
-					observerSet.remove(observer);
-				} else {
-					throw new IllegalArgumentException("Cannot unregister a nonexistent observer!");
-				}
-			}
+		private MyModel(Board.GameState state) {
+			this.state = state;
+		}
 
-			@Nonnull
-			@Override
-			public ImmutableSet<Observer> getObservers() {
-				return ImmutableSet.copyOf(observerSet);
-			}
+		@Nonnull
+		@Override
+		public Board getCurrentBoard() {
+			return state;
+		}
 
-			@Override
-			public void chooseMove(@Nonnull Move move) {
-				this.modelState = this.modelState.advance(move);
-				Observer.Event event;
-				if (this.modelState.getWinner().isEmpty() == true) {
-					event = Observer.Event.MOVE_MADE;
-				} else {
-					event = Observer.Event.GAME_OVER;
-				}
-				for (Observer o : observerSet) {
-					o.onModelChanged(this.modelState, event);
-				}
+		@Override
+		public void registerObserver(@Nonnull Observer observer) {
+			Objects.requireNonNull(observer, "Cannot register a null observer");
+			if (!observers.add(observer)) {
+				throw new IllegalArgumentException("Observer is already registered");
 			}
-		};
-		return model;
+		}
+
+		@Override
+		public void unregisterObserver(@Nonnull Observer observer) {
+			Objects.requireNonNull(observer, "Cannot unregister a null observer");
+			if (!observers.remove(observer)) {
+				throw new IllegalArgumentException("Observer was never registered");
+			}
+		}
+
+		@Nonnull
+		@Override
+		public ImmutableSet<Observer> getObservers() {
+			return ImmutableSet.copyOf(observers);
+		}
+
+		@Override
+		public void chooseMove(@Nonnull Move move) {
+			state = state.advance(move);
+			// Observers see the board as it is after the move, never before.
+			Observer.Event event = state.getWinner().isEmpty()
+					? Observer.Event.MOVE_MADE
+					: Observer.Event.GAME_OVER;
+			for (Observer observer : ImmutableSet.copyOf(observers)) {
+				observer.onModelChanged(state, event);
+			}
+		}
 	}
 }
