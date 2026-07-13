@@ -38,8 +38,8 @@ The game itself is a University of Bristol coursework framework. It arrived thro
 - a **QR private-move channel**, so Mr X can take his turn on a shared screen without the
   detectives reading it over his shoulder
 
-199 tests. The AI catches a random Mr X in every game it plays. Mr X himself is still the
-weaker half, and the README says so below rather than pretending otherwise.
+199 tests. The detective side of the AI is the stronger one; Mr X is still the weaker half, and
+the work on him is unfinished. The README says so below rather than pretending otherwise.
 
 ## Running it
 
@@ -172,18 +172,14 @@ in parallel, from reproducible seeds.
 
 It records more than who won: the round of every secret and double Mr X spends, the round he
 was caught, and the size and entropy of the detectives' belief at the end. That is what
-distinguishes a change that worked from a change that got lucky. When the ticket gates went
-in, the win rate barely moved, but the histogram showed secret spends jumping off rounds 1 to
-3 and onto 4, 9, 14 and 19, immediately after each reveal. The mechanism was doing what it was
-built to do even where the scoreboard was ambivalent.
+distinguishes a change that worked from a change that got lucky, and it is the more useful
+half of the tool. A win rate that moves for the wrong reason is worse than one that does not
+move at all, because you will believe it.
 
-Current standings, 100 games each at a 300ms budget:
-
-| Mr X | Detectives | Mr X wins | Rounds survived |
-|---|---|---|---|
-| MyAi | RandomAi | 77% | 18.0 |
-| RandomAi | MyAi | 0% | 6.9 |
-| MyAi | MyAi | 20% | 11.8 |
+No standings are published here yet. The AI is mid-experiment and the sample sizes so far are
+too small to draw from: at 100 games a win rate carries a standard deviation of about five
+points, which is wider than most of the differences worth arguing about. Run it yourself if
+you want a number today.
 
 ## Other things it does
 
@@ -203,11 +199,12 @@ phone and the screen shows only letters.
 
 ## Known gaps
 
-Mr X is the weak half. He beats a random opponent comfortably but loses the mirror match 4 to
-1, and he survives fewer rounds against himself than the much simpler `GreedyAi` does. Making
-his search model the detectives as chasing his *inferred* position rather than his real one
-was supposed to fix that; it helped a little and did not fix it. Finding out why is the next
-job, and it is a question for the arena rather than for another round of constant-tuning.
+Mr X is the weak half, and the work to fix him is unfinished. He handles a weak opponent, but
+he loses the mirror match against his own detectives, and he survives fewer rounds against
+himself than the far simpler `GreedyAi` manages. Making his search model the detectives as
+chasing his *inferred* position rather than his real one was supposed to fix that. It helped a
+little and did not fix it, and the reason is not yet understood. That is a question for the
+arena, not for another round of tuning constants.
 
 Hot-seat still leaks Mr X's current position: the board reveals his counter on his own turn,
 so the QR channel hides where he is going but not where he is.
