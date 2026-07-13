@@ -1,31 +1,91 @@
-# Scotland Yard Game Implementation 🕵️‍♂️
+# Scotland Yard
 
-## Overview
+A Java implementation of the Scotland Yard board game, played on the real 199-station
+London map. Five detectives hunt Mr X across the city; Mr X moves in secret, surfacing
+only on the reveal rounds.
 
-Scotland Yard is a riveting detective board game brought to life through a sophisticated Java 17 and Maven-based implementation 🖥️. This digital rendition faithfully captures the essence of the classic game 🎲, where players navigate the streets of London 🇬🇧, either as detectives on the hunt or as the elusive Mr. X evading capture. The game leverages modern software engineering principles, including Graph Algorithms, Design Patterns like Visitor and Observer, and advanced Java features such as Generics and anonymous classes, to create a dynamic and engaging experience.
+![Scotland Yard](https://github.com/user-attachments/assets/590211c7-c7bd-437d-9acf-a6c667a2e43f)
 
-![Scotland_Yard](https://github.com/user-attachments/assets/590211c7-c7bd-437d-9acf-a6c667a2e43f)
+## Running it
 
-## Implementation
+Requires **JDK 17**. Maven is not needed — the wrapper fetches it.
 
-The development of Scotland Yard was methodically structured into five crucial phases, each focusing on a core aspect of the game's functionality:
+```bash
+./mvnw test                            # 83 tests
+./mvnw exec:java                       # launch the game
+```
 
-- **MyGameState Constructor and Accessors:** Initiating the game's state with essential attributes including the game setup, Mr. X, detectives, remaining players, and the game's current log. This phase laid the foundation for the game's logic and data management 🚀.
-- **Player Movement:** A critical feature allowing players to traverse the game's map through nodes, implemented via graph algorithms to simulate the complex network of London's transportation system 🚕🚇.
-- **Advance Method:** Utilizing the Visitor Pattern, this method updates the game state based on player moves, demonstrating a nuanced application of design patterns to facilitate game logic evolution 🔄.
-- **Winner Determination:** Implements logic to ascertain the game's outcome based on the positions of Mr. X and the detectives, the availability of moves, and the completion of Mr. X's log 🏆.
-- **Observer Pattern Integration:** A sophisticated implementation that enables dynamic game state observation, allowing for real-time updates and interactions with the game model 🔍.
+On Windows use `mvnw.cmd`. If Maven reports `JAVA_HOME not found`, point it at your JDK:
 
-## Key Components
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
+```
 
-- **MyGameStateFactory Class:** Acts as a factory for creating GameState instances, embodying the Factory Pattern. This class is pivotal for initializing game states with comprehensive attributes, ensuring a robust and flexible game setup process 🏭.
-- **Get Available Moves:** This functionality discerns possible single and double moves for players, encapsulating the strategic element of navigating London's intricate map to outmaneuver opponents 🗺️.
-- **Visitor Pattern & Advance Method:** A showcase of the Visitor Pattern's power, this method facilitates the application of diverse move strategies, updating the game state in a polymorphic and extensible manner 🧩.
-- **Determine the Winner:** A complex logic flow that applies game rules to identify the winner under various scenarios, from capturing Mr. X to successfully evading the detectives throughout the game ⚖️.
-- **Observer Pattern:** Ensures a decoupled and interactive game model, allowing for event-driven updates and notifications that enrich the gameplay experience 📣.
+## How the game is modelled
 
-## Technical Highlights
+The board is a Guava `ImmutableValueGraph<Integer, ImmutableSet<Transport>>`: stations are
+nodes, and each edge carries the set of transports that run along it. A ferry edge is
+crossed only with a secret ticket.
 
-- **Graph Algorithms:** At the heart of player movement and map representation, aiming to showcase a more distinct algorithmic thinking 📊.
-- **Design Patterns:** The use of Visitor and Observer patterns not only adheres to best practices but also highlights the project's design sophistication, enabling scalability and maintenance 🛠️.
-- **Advanced Java Features:** Leveraging Generics for type-safe collections and anonymous classes for succinct event handling and state updates, aiming to demonstrate a deeper understanding of the Java programming language 📚.
+Two classes carry the game logic; everything else is provided framework.
+
+**`MyGameStateFactory`** builds a `GameState` — an immutable snapshot of a game in
+progress. Each state derives its available moves, its winner and its player set once, in
+the constructor, and caches them. `advance(Move)` doesn't mutate anything; it returns a
+new state. That matters for the AI stage, where a search holds thousands of states at once
+and calls `getAvailableMoves()` in its innermost loop.
+
+**`MyModelFactory`** wraps a `GameState` in an observable `Model`. Observers are notified
+after the state has advanced, with `GAME_OVER` in place of `MOVE_MADE` on the final move.
+
+A few rules that the implementation turns on, and that are easy to get subtly wrong:
+
+- A **secret ticket substitutes for any transport**, ferries included, so a secret move
+  exists for every edge out of a station.
+- A **double move spans two rounds**, so it needs two rounds left in the log, and each leg
+  is written to the travel log against *its own* round — a double move straddling a reveal
+  round is hidden for one leg and revealed for the other. Its second ticket is only
+  affordable if the first has already been spent.
+- A detective **hands the ticket it spends to Mr X**, as it moves. A detective late in a
+  rotation can therefore un-strand a Mr X who had no ticket to move with.
+- A detective is out of the game once it has **no legal move** — which is weaker than
+  holding no tickets, since it can hold a full hand and still be boxed in by its own
+  teammates. When that happens it is skipped, and play passes back to Mr X.
+- Detectives win by **landing on Mr X**. Mr X wins by filling the travel log, or by
+  stranding every detective. Once anyone has won there are no available moves.
+
+## Layout
+
+```
+src/main/java/uk/ac/bris/cs/scotlandyard/
+  model/          game logic — MyGameStateFactory and MyModelFactory are the implementation,
+                  the rest (Board, Move, Player, ScotlandYard, Ai, …) is framework
+  ui/             JavaFX views and controllers
+src/main/resources/
+  graph.txt       the 199-station map, 467 edges
+  pos.txt         station coordinates for the board image
+src/test/         83 tests; AllTest is the suite the build runs
+```
+
+## AI players
+
+`ResourceManager.scanAis()` scans the classpath at startup, so an AI is a drop-in: any
+public class with a no-arg constructor implementing `Ai` is found automatically and offered
+in the setup screen.
+
+```java
+public interface Ai {
+    String name();
+    Move pickMove(Board board, Pair<Long, TimeUnit> timeoutPair);
+    default void onStart() {}
+    default void onTerminate() {}
+}
+```
+
+Two constraints shape any implementation. `pickMove` runs against the timeout it is handed
+and is killed one second after it expires, so a search needs a hard internal deadline. And
+`Board` deliberately **has no `getMrXLocation()`** — a detective AI has to infer where Mr X
+is from the travel log, which only names a station on the reveal rounds (3, 8, 13, 18, 24),
+propagating outward through the ticket types he logged in between.
+
+**No AI is implemented yet.** The interface and its discovery mechanism are in place.
