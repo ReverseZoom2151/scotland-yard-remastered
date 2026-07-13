@@ -12,6 +12,7 @@
 
     <properties>
         <runSuite>**/AllTest.class</runSuite>
+        <runAiSuite>**/ui/ai/*Test.class</runAiSuite>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <skipAfter>0</skipAfter>
         <werror>true</werror>
@@ -137,6 +138,7 @@
                 <configuration>
                     <includes>
                         <include>${runSuite}</include>
+                        <include>${runAiSuite}</include>
                     </includes>
                     <trimStackTrace>false</trimStackTrace>
                     <skipAfterFailureCount>${skipAfter}</skipAfterFailureCount>

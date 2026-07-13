@@ -24,9 +24,17 @@ public final class MyAi implements Ai {
 
 	/**
 	 * How much of the allotted time we give back, so the move is returned before the
-	 * AI is killed. Generous: the cost of overrunning is losing the game outright.
+	 * AI is killed. Generous, because the cost of overrunning is losing outright.
 	 */
 	private static final long SAFETY_BUFFER_NANOS = 500_000_000L;
+
+	/**
+	 * The buffer never eats more than this share of the budget. A flat 500ms is the
+	 * right giveback against the 30 second move timer the game actually uses, but it
+	 * swallows a small budget whole and leaves no time to search at all, which turns
+	 * every short-budget move into a blind fallback.
+	 */
+	private static final int BUFFER_MAX_SHARE = 5;
 
 	/**
 	 * Built lazily, on the first move. {@link #onStart()} is handed no board, and
@@ -68,7 +76,8 @@ public final class MyAi implements Ai {
 		final Move fallback = board.getAvailableMoves().iterator().next();
 		try {
 			final long budget = timeoutPair.right().toNanos(timeoutPair.left());
-			final long deadline = System.nanoTime() + Math.max(budget - SAFETY_BUFFER_NANOS, 0L);
+			final long buffer = Math.min(SAFETY_BUFFER_NANOS, budget / BUFFER_MAX_SHARE);
+			final long deadline = System.nanoTime() + Math.max(budget - buffer, 0L);
 
 			final Search engine = prepare(board);
 			final boolean mrXToMove = board.getAvailableMoves().stream()

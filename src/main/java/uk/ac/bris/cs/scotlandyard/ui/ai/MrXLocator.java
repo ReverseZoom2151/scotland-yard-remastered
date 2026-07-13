@@ -75,13 +75,20 @@ public final class MrXLocator {
 			if (candidates.isEmpty())
 				candidates.addAll(graph.nodes());
 		}
-		candidates.removeAll(occupied);
 
 		// Propagate forward, one logged move at a time. A DOUBLE move writes two
 		// entries, so iterating entries handles it with no special case.
+		//
+		// Do NOT prune intermediate steps against where the detectives stand now. Those
+		// steps are stations Mr X passed through in the PAST, and a detective that has
+		// since walked onto one of them would sever a branch he really took, dropping his
+		// true location from the set without any sign that it had happened. What we know
+		// is only about the present: he cannot be standing on a detective right now. So
+		// the occupancy filter belongs on the final set alone.
 		for (int i = lastReveal + 1; i < log.size() && !candidates.isEmpty(); i++) {
-			candidates = expand(graph, candidates, log.get(i).ticket(), occupied);
+			candidates = expand(graph, candidates, log.get(i).ticket());
 		}
+		candidates.removeAll(occupied);
 
 		// Never empty. A contradiction would mean our model of the log is wrong; rather
 		// than hand the search an empty set, admit total ignorance.
@@ -97,23 +104,21 @@ public final class MrXLocator {
 
 	/**
 	 * One step of the propagation: every station reachable from some candidate by an
-	 * edge that {@code ticket} pays for, minus the stations detectives occupy.
+	 * edge that {@code ticket} pays for.
 	 *
 	 * <p>
 	 * A SECRET ticket crosses <i>any</i> edge, so it expands along all neighbours
-	 * unconditionally — that includes ferry edges, which no other ticket can use
-	 * (their required ticket is itself SECRET).
+	 * unconditionally. That includes ferry edges, which no other ticket can use, since
+	 * their required ticket is itself SECRET.
 	 */
 	private static Set<Integer> expand(ImmutableValueGraph<Integer, ImmutableSet<Transport>> graph,
-			Set<Integer> candidates, Ticket ticket, Set<Integer> occupied) {
+			Set<Integer> candidates, Ticket ticket) {
 		Set<Integer> next = new LinkedHashSet<>();
 		boolean secret = ticket == Ticket.SECRET;
 		for (int c : candidates) {
 			if (!graph.nodes().contains(c))
 				continue;
 			for (int n : graph.adjacentNodes(c)) {
-				if (occupied.contains(n))
-					continue; // he would have been caught standing there
 				if (secret || servedBy(graph, c, n, ticket))
 					next.add(n);
 			}
