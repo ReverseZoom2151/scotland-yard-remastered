@@ -17,12 +17,29 @@ import uk.ac.bris.cs.scotlandyard.model.ScotlandYard.Transport;
  * Shortest-path distances over the London map.
  *
  * <p>
- * Two notions of distance live here. The plain one ignores tickets and is the
- * hop count between two stations; it is precomputed for every pair once, since
- * the map never changes. The ticket-aware one accounts for what a given
- * detective can actually pay for — a detective out of underground tickets
- * cannot use the tube, so its real distance to Mr X is longer than the map
- * suggests.
+ * Three notions of distance live here.
+ *
+ * <ul>
+ * <li>{@link #hops(int, int)} — the plain hop count over <i>every</i> edge,
+ * ferries included. This is <b>Mr X's</b> metric: he is the only player who can
+ * hold a SECRET ticket, and a ferry edge's required ticket <i>is</i> SECRET, so
+ * he is the only player who can ever board one.
+ * <li>{@link #detectiveHops(int, int)} — the same hop count over the edges a
+ * <b>detective</b> can actually walk: every edge carrying at least one non-ferry
+ * transport. Detectives never hold SECRET tickets ({@code MyGameStateFactory}
+ * rejects a detective that does), so a ferry-only edge is a wall to them. Use
+ * this whenever the question is "how close is a detective to X"; using
+ * {@link #hops} there makes detectives look nearer than they can ever get, and
+ * flatters Mr X's sense of safety.
+ * <li>{@link #ticketAwareDistance} — a detective's distance given the tickets it
+ * is actually holding right now. Strictly the sharpest of the three for a
+ * detective, and it already excludes ferries for free (see its notes), but it is
+ * a BFS per call rather than a table lookup.
+ * </ul>
+ *
+ * <p>
+ * Both hop tables are precomputed for every pair once, since the map never
+ * changes.
  */
 public final class Distances {
 
@@ -38,8 +55,14 @@ public final class Distances {
 	/** allPairs[i][j] = hop count between nodes[i] and nodes[j], or MAX_VALUE. */
 	private final int[][] allPairs;
 
+	/** As {@link #allPairs}, but over detective-usable (non-ferry-only) edges alone. */
+	private final int[][] allPairsNoFerry;
+
 	/** Dense adjacency: neighbours[i] holds the indices adjacent to index i. */
 	private final int[][] neighbours;
+
+	/** As {@link #neighbours}, minus the neighbours only a ferry edge reaches. */
+	private final int[][] neighboursNoFerry;
 
 	/**
 	 * Precomputes all-pairs hop distances for the given map. Call once, from
@@ -62,25 +85,46 @@ public final class Distances {
 
 		final int n = this.nodes.length;
 		this.neighbours = new int[n][];
+		this.neighboursNoFerry = new int[n][];
 		for (int i = 0; i < n; i++) {
 			final var adjacent = graph.adjacentNodes(this.nodes[i]);
 			final int[] row = new int[adjacent.size()];
+			final int[] walkable = new int[adjacent.size()];
 			int k = 0;
+			int w = 0;
 			for (int neighbour : adjacent) {
-				row[k++] = this.indexOf.get(neighbour);
+				final int j = this.indexOf.get(neighbour);
+				row[k++] = j;
+				if (detectiveUsable(graph, this.nodes[i], neighbour)) walkable[w++] = j;
 			}
 			this.neighbours[i] = row;
+			this.neighboursNoFerry[i] = Arrays.copyOf(walkable, w);
 		}
 
-		// 199 BFS runs, one per source; trivially cheap and done once.
+		// 199 BFS runs per metric, one per source; trivially cheap and done once.
 		this.allPairs = new int[n][];
+		this.allPairsNoFerry = new int[n][];
 		for (int i = 0; i < n; i++) {
-			this.allPairs[i] = bfs(i);
+			this.allPairs[i] = bfs(i, this.neighbours);
+			this.allPairsNoFerry[i] = bfs(i, this.neighboursNoFerry);
 		}
 	}
 
-	/** Plain hop-count BFS from a dense source index over the whole graph. */
-	private int[] bfs(int source) {
+	/**
+	 * @return whether a detective could ever cross the edge {@code (a, b)}: it must
+	 *         carry a transport other than the ferry. A ferry demands a SECRET
+	 *         ticket, and no detective is ever dealt one.
+	 */
+	private static boolean detectiveUsable(ImmutableValueGraph<Integer, ImmutableSet<Transport>> graph,
+			int a, int b) {
+		for (Transport transport : graph.edgeValueOrDefault(a, b, ImmutableSet.of())) {
+			if (transport != Transport.FERRY) return true;
+		}
+		return false;
+	}
+
+	/** Plain hop-count BFS from a dense source index over the given adjacency. */
+	private int[] bfs(int source, int[][] adjacency) {
 		final int[] dist = new int[this.nodes.length];
 		Arrays.fill(dist, Integer.MAX_VALUE);
 		dist[source] = 0;
@@ -88,7 +132,7 @@ public final class Distances {
 		queue.add(source);
 		while (!queue.isEmpty()) {
 			final int current = queue.remove();
-			for (int neighbour : this.neighbours[current]) {
+			for (int neighbour : adjacency[current]) {
 				if (dist[neighbour] == Integer.MAX_VALUE) {
 					dist[neighbour] = dist[current] + 1;
 					queue.add(neighbour);
@@ -99,6 +143,10 @@ public final class Distances {
 	}
 
 	/**
+	 * The hop count over <i>every</i> edge, ferries included — <b>Mr X's</b> metric.
+	 * For a detective, prefer {@link #detectiveHops(int, int)}: this one lets it
+	 * "swim".
+	 *
 	 * @return the fewest edges between {@code source} and {@code destination},
 	 *         ignoring tickets, or {@link Integer#MAX_VALUE} if unreachable
 	 */
@@ -107,6 +155,25 @@ public final class Distances {
 		final Integer to = this.indexOf.get(destination);
 		if (from == null || to == null) return Integer.MAX_VALUE;
 		return this.allPairs[from][to];
+	}
+
+	/**
+	 * The hop count over the edges a <b>detective</b> can walk — every edge except
+	 * the ferry-only ones, which need a SECRET ticket no detective ever holds.
+	 *
+	 * <p>
+	 * Always {@code >= hops(source, destination)}: dropping edges can only lengthen
+	 * a path. Use it wherever the travelling player is a detective and its exact
+	 * ticket purse is unknown or irrelevant; where the purse is known,
+	 * {@link #ticketAwareDistance} is sharper still.
+	 *
+	 * @return the fewest such edges, or {@link Integer#MAX_VALUE} if unreachable
+	 */
+	public int detectiveHops(int source, int destination) {
+		final Integer from = this.indexOf.get(source);
+		final Integer to = this.indexOf.get(destination);
+		if (from == null || to == null) return Integer.MAX_VALUE;
+		return this.allPairsNoFerry[from][to];
 	}
 
 	/**
@@ -133,6 +200,14 @@ public final class Distances {
 	 * {@link Integer#MAX_VALUE} when a whole transport mode is unaffordable and
 	 * the destination lies behind it.
 	 *
+	 * <p>
+	 * <b>Ferries.</b> This already handles them, with no special case: a ferry's
+	 * required ticket is SECRET, {@link #canAfford} therefore asks a detective for
+	 * a SECRET ticket, and a detective never has one — so a ferry-only edge is
+	 * never {@link #usable} to a detective. Mr X, who does carry secrets, keeps
+	 * them. Nothing to fix here; the hole was only in {@link #hops}, hence
+	 * {@link #detectiveHops}.
+	 *
 	 * @param board       the board, for the map and the player's ticket counts
 	 * @param piece       the player travelling
 	 * @param source      where it starts
@@ -143,9 +218,35 @@ public final class Distances {
 	public int ticketAwareDistance(Board board, uk.ac.bris.cs.scotlandyard.model.Piece piece,
 			int source, int destination) {
 		if (source == destination) return 0;
-		if (!this.indexOf.containsKey(source) || !this.indexOf.containsKey(destination)) {
-			return Integer.MAX_VALUE;
-		}
+		final Integer to = this.indexOf.get(destination);
+		if (to == null || !this.indexOf.containsKey(source)) return Integer.MAX_VALUE;
+		return ticketAwareDistancesFrom(board, piece, source)[to];
+	}
+
+	/**
+	 * Every ticket-aware distance from one origin, in a single BFS.
+	 *
+	 * <p>
+	 * The same walk as {@link #ticketAwareDistance}, and the same approximation — but
+	 * done once for all destinations. A player scoring its own moves is asking about
+	 * one origin (its target) and many destinations, and calling
+	 * {@link #ticketAwareDistance} in that loop pays for a whole BFS per move. The
+	 * subgraph a player can afford is undirected, so the distance from the target to a
+	 * move's destination is also the distance from that destination to the target —
+	 * which is what {@link #distancesFrom} hands back.
+	 *
+	 * @param board  the board, for the map and the player's ticket counts
+	 * @param piece  the player travelling
+	 * @param origin where it starts
+	 * @return distances indexed by this instance's dense node index; entries are
+	 *         {@link Integer#MAX_VALUE} where unreachable
+	 */
+	private int[] ticketAwareDistancesFrom(Board board, uk.ac.bris.cs.scotlandyard.model.Piece piece,
+			int origin) {
+		final int[] dist = new int[this.nodes.length];
+		Arrays.fill(dist, Integer.MAX_VALUE);
+		final Integer from = this.indexOf.get(origin);
+		if (from == null) return dist;
 
 		// Which transports this player can pay for at all, resolved once up front.
 		final Map<Transport, Boolean> affordable = new HashMap<>();
@@ -153,17 +254,11 @@ public final class Distances {
 			affordable.put(transport, canAfford(board, piece, transport));
 		}
 
-		final int from = this.indexOf.get(source);
-		final int to = this.indexOf.get(destination);
-
-		final int[] dist = new int[this.nodes.length];
-		Arrays.fill(dist, Integer.MAX_VALUE);
 		dist[from] = 0;
 		final Deque<Integer> queue = new ArrayDeque<>();
 		queue.add(from);
 		while (!queue.isEmpty()) {
 			final int current = queue.remove();
-			if (current == to) return dist[current];
 			for (int neighbour : this.neighbours[current]) {
 				if (dist[neighbour] != Integer.MAX_VALUE) continue;
 				if (!usable(current, neighbour, affordable)) continue;
@@ -171,7 +266,42 @@ public final class Distances {
 				queue.add(neighbour);
 			}
 		}
-		return dist[to];
+		return dist;
+	}
+
+	/**
+	 * A reusable table of ticket-aware distances from one station, for a player about
+	 * to score many candidate destinations against the same target. One BFS, then a
+	 * lookup per destination.
+	 *
+	 * @param board  the board, for the map and the player's ticket counts
+	 * @param piece  the player travelling
+	 * @param origin the station every distance is measured from
+	 * @return a table; see {@link Table#to(int)}
+	 */
+	public Table distancesFrom(Board board, uk.ac.bris.cs.scotlandyard.model.Piece piece, int origin) {
+		return new Table(this.indexOf, ticketAwareDistancesFrom(board, piece, origin));
+	}
+
+	/** Ticket-aware distances from a fixed origin. See {@link Distances#distancesFrom}. */
+	public static final class Table {
+
+		private final Map<Integer, Integer> indexOf;
+		private final int[] dist;
+
+		private Table(Map<Integer, Integer> indexOf, int[] dist) {
+			this.indexOf = indexOf;
+			this.dist = dist;
+		}
+
+		/**
+		 * @return the distance from the origin to {@code station}, or
+		 *         {@link Integer#MAX_VALUE} if it cannot be afforded or does not exist
+		 */
+		public int to(int station) {
+			final Integer index = this.indexOf.get(station);
+			return index == null ? Integer.MAX_VALUE : this.dist[index];
+		}
 	}
 
 	/** @return whether any transport on the edge between two dense indices is affordable. */
