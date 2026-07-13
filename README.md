@@ -84,8 +84,35 @@ public interface Ai {
 
 Two constraints shape any implementation. `pickMove` runs against the timeout it is handed
 and is killed one second after it expires, so a search needs a hard internal deadline. And
-`Board` deliberately **has no `getMrXLocation()`** — a detective AI has to infer where Mr X
-is from the travel log, which only names a station on the reveal rounds (3, 8, 13, 18, 24),
-propagating outward through the ticket types he logged in between.
+`Board` deliberately **has no `getMrXLocation()`**.
 
-**No AI is implemented yet.** The interface and its discovery mechanism are in place.
+That second one is the interesting problem, and `ui/ai/` is an answer to it.
+
+| | |
+|---|---|
+| `MrXLocator` | Infers where Mr X is, for the detective side. |
+| `BoardStates` | Rebuilds an advanceable `GameState` from a `Board`. |
+| `Distances` | All-pairs hops, precomputed; plus a ticket-aware distance. |
+| `Evaluator` | Scores a position from Mr X's point of view. |
+| `Search` | Alpha-beta, deepened until the clock runs out. |
+| `MyAi` | Ties it together. |
+
+**Finding Mr X.** The travel log names a station only on the reveal rounds — but between
+them it still records the *kind* of ticket he spent, and that is the leak. A taxi ticket can
+only have carried him down a taxi edge. So: seed the candidate set at his last reveal, then
+expand it once per logged entry along the edges that ticket could have paid for. Candidates
+standing on a detective are pruned, because he would have been caught. A secret ticket
+crosses any edge, so it expands everywhere and tells you nothing — which is exactly what
+makes it worth holding.
+
+**Scoring.** Distance to the detectives (weighted toward the nearest, since that is the one
+that catches you), freedom (how many onward moves the station leaves), and safety (whether a
+detective can reach it next move). These multiply rather than add, so a station that is
+catastrophic on any single axis is vetoed outright instead of being averaged back into
+respectability. Secret and double tickets are priced, so Mr X spends them to escape and not
+idly.
+
+**Searching.** Iterative deepening against the real deadline: a ply only replaces the
+incumbent move once it has finished, so the search is always safe to interrupt. Detectives
+are modelled greedily rather than branched — every detective moving in every combination
+explodes the tree, and depth is worth more than an exact reply.
