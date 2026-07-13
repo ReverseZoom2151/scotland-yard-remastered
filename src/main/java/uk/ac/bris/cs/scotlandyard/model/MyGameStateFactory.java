@@ -134,14 +134,16 @@ public final class MyGameStateFactory implements Factory<GameState> {
 				}
 				return ImmutableSet.copyOf(pieceSet);
 			}
-			boolean hasTickets = false;
-			for (Player d : this.detectives)
-				for (Integer countTickets : d.tickets().values()) {
-					if (countTickets >= 1) {
-						hasTickets = true;
-					}
+			// A detective is out of the game when it has no legal move, which is
+			// strictly weaker than having no tickets: it may hold tickets and still
+			// be boxed in by its teammates.
+			boolean detectivesCanMove = false;
+			for (Player d : this.detectives) {
+				if (!makeSingleMoves(this.setup, d, d.location(), this.detectives).isEmpty()) {
+					detectivesCanMove = true;
 				}
-			if ((hasTickets == false)
+			}
+			if ((detectivesCanMove == false)
 					|| (this.moves.isEmpty() == true) && (this.remaining.contains(this.mrX.piece()) == false)) {
 				return ImmutableSet.of(this.mrX.piece());
 			}
@@ -218,16 +220,13 @@ public final class MyGameStateFactory implements Factory<GameState> {
 					logEntryList.add(b);
 				}
 				for (Player d : detectives) {
-					boolean wonder = false;
-					for (Integer value : d.tickets().values()) {
-						if (value > 0) {
-							wonder = true;
-						}
-					}
-					if (wonder == true) {
+					if (!makeSingleMoves(this.setup, d, d.location(), this.detectives).isEmpty()) {
 						remnant.add(d.piece());
 					}
 					playerList.add(d);
+				}
+				if (remnant.isEmpty()) {
+					remnant.add(mrX2.piece());
 				}
 			} else {
 				for (Player d : detectives) {
@@ -246,6 +245,13 @@ public final class MyGameStateFactory implements Factory<GameState> {
 						playerList.add(d);
 					}
 				}
+				// A teammate moving may have boxed in a detective that still had a
+				// move at the start of the rotation; drop anyone now immobile.
+				remnant.removeIf(p -> playerList.stream()
+						.filter(pl -> pl.piece().equals(p))
+						.findFirst()
+						.map(pl -> makeSingleMoves(this.setup, pl, pl.location(), playerList).isEmpty())
+						.orElse(true));
 				if (remnant.isEmpty() == true) {
 					remnant.add(this.mrX.piece());
 				}
