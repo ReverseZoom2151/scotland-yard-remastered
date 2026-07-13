@@ -15,6 +15,7 @@ import org.junit.runners.Suite;
 		GameStateDetectivesAvailableMovesTest.class,
 		GameStateMrXAvailableMovesTest.class,
 		GameStatePlayoutTest.class,
+		GameStartIsPlayableTest.class,
 		ModelObserverTest.class
 })
 public class AllTest {}
