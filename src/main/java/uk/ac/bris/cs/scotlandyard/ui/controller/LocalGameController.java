@@ -4,9 +4,14 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Resources;
 
+import java.io.File;
+import java.io.IOException;
 import java.net.URL;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
 import java.util.ResourceBundle;
 import java.util.stream.Collectors;
 
@@ -15,11 +20,17 @@ import javax.annotation.Nonnull;
 import javafx.application.Platform;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
+import javafx.scene.control.Alert;
+import javafx.scene.control.Alert.AlertType;
+import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
+import javafx.stage.FileChooser;
+import javafx.stage.FileChooser.ExtensionFilter;
 import javafx.stage.Stage;
 import uk.ac.bris.cs.scotlandyard.ResourceManager;
 import uk.ac.bris.cs.scotlandyard.ResourceManager.ImageResource;
 import uk.ac.bris.cs.scotlandyard.model.Board;
+import uk.ac.bris.cs.scotlandyard.model.Board.GameState;
 import uk.ac.bris.cs.scotlandyard.model.GameSetup;
 import uk.ac.bris.cs.scotlandyard.model.Model;
 import uk.ac.bris.cs.scotlandyard.model.Model.Observer;
@@ -30,6 +41,10 @@ import uk.ac.bris.cs.scotlandyard.model.Piece;
 import uk.ac.bris.cs.scotlandyard.model.Player;
 import uk.ac.bris.cs.scotlandyard.model.ScotlandYard.Factory;
 import uk.ac.bris.cs.scotlandyard.model.ScotlandYard.Ticket;
+import uk.ac.bris.cs.scotlandyard.persistence.GameRecord;
+import uk.ac.bris.cs.scotlandyard.persistence.GameRecordIO;
+import uk.ac.bris.cs.scotlandyard.persistence.History;
+import uk.ac.bris.cs.scotlandyard.persistence.Scenarios;
 import uk.ac.bris.cs.scotlandyard.ui.GameControl;
 import uk.ac.bris.cs.scotlandyard.ui.controller.LocalSetupController.Features;
 import uk.ac.bris.cs.scotlandyard.ui.controller.NotificationController.NotificationBuilder;
@@ -57,6 +72,9 @@ public final class LocalGameController extends BaseGameController {
 		super(manager, stage, new BoardViewProperty());
 	}
 
+	/** Everything the game is currently playing out; null before the first game. */
+	private GameSession session;
+
 	@Override
 	public void initialize(URL location, ResourceBundle resources) {
 		MenuItem newGame = new MenuItem("New game");
@@ -66,8 +84,31 @@ public final class LocalGameController extends BaseGameController {
 			getStage().close();
 			LocalGameController.newGame(resourceManager, new Stage());
 		});
-		addMenuItem(newGame);
+
+		MenuItem save = new MenuItem("Save game...");
+		save.setOnAction(e -> saveGame());
+		MenuItem load = new MenuItem("Load game...");
+		load.setOnAction(e -> loadGame());
+		MenuItem undo = new MenuItem("Undo move");
+		undo.setOnAction(e -> undoMove());
+		MenuItem redo = new MenuItem("Redo move");
+		redo.setOnAction(e -> redoMove());
+
+		Menu scenarios = new Menu("Scenarios");
+		Scenarios.records().forEach((name, record) -> {
+			MenuItem item = new MenuItem(name);
+			item.setOnAction(e -> startScenario(name, record.get()));
+			scenarios.getItems().add(item);
+		});
+
+		// addMenuItem inserts at the top, so add in reverse of the order wanted
+		addMenuItem(scenarios);
+		addMenuItem(redo);
+		addMenuItem(undo);
+		addMenuItem(load);
+		addMenuItem(save);
 		addMenuItem(reset);
+		addMenuItem(newGame);
 		setupGame();
 	}
 
@@ -202,38 +243,325 @@ public final class LocalGameController extends BaseGameController {
 	}
 
 	private void createGame(ModelProperty setup) {
+		GameSetup gameSetup = new GameSetup(
+				setup.graphProperty().get(),
+				ImmutableList.copyOf(setup.revealRounds()));
+		Player mrX = setup.mrX().asPlayer();
+		ImmutableList<Player> detectives = setup.detectives().stream()
+				.map(PlayerProperty::asPlayer)
+				.collect(ImmutableList.toImmutableList());
+		startGame(GameRecord.of(gameSetup, mrX, detectives, ImmutableList.of()), setup);
+	}
+
+	// --- save / load / undo / redo / scenarios
+	// ---------------------------------------------
+
+	/**
+	 * A game in progress. The model is immutable and every state is derived, so
+	 * there is nothing here that cannot be rebuilt from the players the game started
+	 * with plus the moves played since — which is exactly what a save file holds and
+	 * what {@link History} rewinds.
+	 */
+	private static final class GameSession {
+		private final ModelProperty config;
+		private final GameSetup setup;
+		private final Player mrX;
+		private final ImmutableList<Player> detectives;
+		private final History history;
+		private final Model model;
+		private final ImmutableList<GameControl> controls;
+		private boolean attached = true;
+
+		private GameSession(ModelProperty config, GameSetup setup, Player mrX,
+				ImmutableList<Player> detectives, History history, Model model,
+				ImmutableList<GameControl> controls) {
+			this.config = config;
+			this.setup = setup;
+			this.mrX = mrX;
+			this.detectives = detectives;
+			this.history = history;
+			this.model = model;
+			this.controls = controls;
+		}
+
+		private GameRecord record() {
+			return GameRecord.of(setup, mrX, detectives, history.movesToCurrent());
+		}
+	}
+
+	/**
+	 * Starts a game from a record: a fresh setup, a save file, a scenario and an
+	 * undone game are all the same thing, so they all come through here.
+	 *
+	 * <p>
+	 * {@code MyModelFactory} only builds a model from a starting position, and it is
+	 * graded coursework, so it is left alone: the moves are instead folded back into
+	 * a freshly built model <em>before</em> any observer is attached, which replays
+	 * the game silently and leaves the model sitting on the state we want.
+	 *
+	 * @param record the game to play out
+	 * @param base   the UI configuration to inherit the timeout and the AIs from
+	 */
+	private void startGame(GameRecord record, ModelProperty base) {
 		hideOverlay();
 		try {
-			var modelFactory = (new MyModelFactory());
-			var model = modelFactory.build(new GameSetup(
-					setup.graphProperty().get(),
-					ImmutableList.copyOf(setup.revealRounds())),
-					setup.mrX().asPlayer(),
-					setup.detectives().stream()
-							.map(PlayerProperty::asPlayer)
-							.collect(ImmutableList.toImmutableList()));
+			detachCurrentGame();
+			GameRecord.Replay replay = record.replay();
+			GameSetup gameSetup = record.setup();
+			Player mrX = record.mrX();
+			ImmutableList<Player> detectives = record.detectives();
 
+			Model built = new MyModelFactory().build(gameSetup, mrX, detectives);
+			// no observers yet: the replay is silent, no AI wakes up, no counter moves
+			for (Move move : replay.moves()) {
+				built.chooseMove(move);
+			}
+			if (!built.getCurrentBoard().getWinner().isEmpty()) {
+				alert(AlertType.INFORMATION, "That game is already over",
+						"The winner was " + built.getCurrentBoard().getWinner() + ".");
+				setupGame();
+				return;
+			}
+
+			History history = new History(replay.states().get(0));
+			for (int i = 0; i < replay.moves().size(); i++) {
+				history.push(replay.moves().get(i), replay.states().get(i + 1));
+			}
+
+			ModelProperty config = configFor(base, record, replay);
 			// XXX var causes LambdaFactory related errors
 			ImmutableList<GameControl> controls = ImmutableList.of(map, travelLog, ticketBoard,
 					status);
+			Model model = recording(built, history);
+			GameSession current = new GameSession(config, gameSetup, mrX, detectives, history, model,
+					controls);
+			this.session = current;
+
 			controls.forEach(model::registerObserver);
-			controls.forEach(l -> l.onGameAttach(model, setup, timeoutWinner -> {
-				notifyGameOver(model, controls, setup, timeoutWinner);
-			}));
 			model.registerObserver(new Observer() {
 				@Override
 				public void onModelChanged(@Nonnull Board board, @Nonnull Event event) {
 					if (event == Event.GAME_OVER) {
-						// model.recorded().forEach(a -> System.out.println(a));
-						Platform.runLater(() -> notifyGameOver(model, controls, setup,
-								board.getWinner()));
+						Platform.runLater(() -> {
+							current.attached = false;
+							notifyGameOver(model, controls, config, board.getWinner());
+						});
 					}
 				}
 			});
+			controls.forEach(l -> l.onGameAttach(model, config, timeoutWinner -> {
+				current.attached = false;
+				notifyGameOver(model, controls, config, timeoutWinner);
+			}));
 		} catch (Exception e) {
 			e.printStackTrace();
 			handleFatalException(e);
 		}
+	}
+
+	/**
+	 * Wraps the model so that every move the board makes is recorded. The next state
+	 * is folded here rather than read back from the model, so the history is up to
+	 * date before any observer — the AI included — sees the move.
+	 */
+	private static Model recording(Model delegate, History history) {
+		return new Model() {
+			@Nonnull
+			@Override
+			public Board getCurrentBoard() {
+				return delegate.getCurrentBoard();
+			}
+
+			@Override
+			public void registerObserver(@Nonnull Observer observer) {
+				delegate.registerObserver(observer);
+			}
+
+			@Override
+			public void unregisterObserver(@Nonnull Observer observer) {
+				delegate.unregisterObserver(observer);
+			}
+
+			@Nonnull
+			@Override
+			public ImmutableSet<Observer> getObservers() {
+				return delegate.getObservers();
+			}
+
+			@Override
+			public void chooseMove(@Nonnull Move move) {
+				history.push(move, ((GameState) delegate.getCurrentBoard()).advance(move));
+				delegate.chooseMove(move);
+			}
+		};
+	}
+
+	private void detachCurrentGame() {
+		GameSession current = session;
+		session = null;
+		if (current == null || !current.attached) {
+			return;
+		}
+		current.attached = false;
+		current.controls.forEach(GameControl::onGameDetached);
+		current.controls.forEach(current.model::unregisterObserver);
+		notifications.dismissAll();
+	}
+
+	/**
+	 * The board views draw their counters and ticket boards from the configuration,
+	 * so a resumed game needs one describing where everybody is <em>now</em>, not
+	 * where they started.
+	 */
+	private ModelProperty configFor(ModelProperty base, GameRecord record,
+			GameRecord.Replay replay) {
+		Board now = replay.finalState();
+		int mrXLocation = mrXLocationAfter(record.mrX().location(), replay.moves());
+		List<PlayerProperty<? super Piece>> players = new ArrayList<>();
+		for (Player player : ImmutableList.<Player>builder()
+				.add(record.mrX()).addAll(record.detectives()).build()) {
+			PlayerProperty<Piece> property = new PlayerProperty<>(player.piece());
+			property.locationProperty().set(player.isMrX()
+					? mrXLocation
+					: now.getDetectiveLocation((Piece.Detective) player.piece())
+							.orElse(player.location()));
+			property.tickets().forEach(ticket -> now.getPlayerTickets(player.piece())
+					.ifPresent(board -> ticket.countProperty().set(board.getCount(ticket.ticket()))));
+			players.add(property);
+		}
+		return new ModelProperty(base.timeoutProperty().get(), record.rounds(),
+				ImmutableList.copyOf(players), GameRecord.standardGraph(),
+				base.getMrXAi(), base.getDetectivesAi());
+	}
+
+	/** MrX hides from the board, but not from us: we know every move he has made. */
+	private static int mrXLocationAfter(int start, ImmutableList<Move> moves) {
+		int location = start;
+		for (Move move : moves) {
+			if (move.commencedBy().isMrX()) {
+				location = move.visit(new FunctionalVisitor<>(
+						m -> m.destination, m -> m.destination2));
+			}
+		}
+		return location;
+	}
+
+	private void saveGame() {
+		GameSession current = session;
+		if (current == null) {
+			alert(AlertType.WARNING, "Nothing to save", "Start a game first.");
+			return;
+		}
+		FileChooser chooser = new FileChooser();
+		chooser.setTitle("Save game");
+		chooser.setInitialFileName("scotlandyard." + GameRecordIO.EXTENSION);
+		chooser.getExtensionFilters().add(
+				new ExtensionFilter("Scotland Yard save", "*." + GameRecordIO.EXTENSION));
+		File file = chooser.showSaveDialog(getStage());
+		if (file == null) {
+			return;
+		}
+		try {
+			GameRecordIO.save(current.record(), file.toPath());
+			notifications.show("notify_saved",
+					new NotificationBuilder("Game saved to " + file.getName()).create());
+		} catch (IOException | RuntimeException e) {
+			alert(AlertType.ERROR, "Could not save the game", String.valueOf(e.getMessage()));
+		}
+	}
+
+	private void loadGame() {
+		FileChooser chooser = new FileChooser();
+		chooser.setTitle("Load game");
+		chooser.getExtensionFilters().add(
+				new ExtensionFilter("Scotland Yard save", "*." + GameRecordIO.EXTENSION));
+		File file = chooser.showOpenDialog(getStage());
+		if (file == null) {
+			return;
+		}
+		Path path = file.toPath();
+		try {
+			GameRecord record = GameRecordIO.load(path);
+			// fail before tearing the running game down
+			record.replay();
+			startGame(record, baseConfig());
+		} catch (IOException | RuntimeException e) {
+			alert(AlertType.ERROR, "Could not load " + file.getName(), String.valueOf(e.getMessage()));
+		}
+	}
+
+	private void startScenario(String name, GameRecord record) {
+		try {
+			startGame(record, baseConfig());
+			notifications.show("notify_scenario",
+					new NotificationBuilder("Scenario: " + name).create());
+		} catch (RuntimeException e) {
+			alert(AlertType.ERROR, "Could not start the scenario " + name,
+					String.valueOf(e.getMessage()));
+		}
+	}
+
+	/**
+	 * Undo has to step back a whole ply, not a half-move: an AI handed the turn back
+	 * would simply play the same move again.
+	 */
+	private void undoMove() {
+		GameSession current = session;
+		if (current == null || !current.history.canUndo()) {
+			alert(AlertType.INFORMATION, "Nothing to undo", "No move has been made yet.");
+			return;
+		}
+		Optional<Piece> toMove = History.pieceToMove(current.history.current());
+		if (toMove.isPresent()) {
+			current.history.undoUntilPieceToMove(toMove.get());
+		} else {
+			current.history.undo();
+		}
+		rebuildFromHistory(current);
+	}
+
+	private void redoMove() {
+		GameSession current = session;
+		if (current == null || !current.history.canRedo()) {
+			alert(AlertType.INFORMATION, "Nothing to redo", "No move has been taken back.");
+			return;
+		}
+		current.history.redo();
+		rebuildFromHistory(current);
+	}
+
+	/**
+	 * Rebuilds the model at the history's cursor. The history itself survives, so a
+	 * move that has been undone can still be put back.
+	 */
+	private void rebuildFromHistory(GameSession current) {
+		History history = current.history;
+		GameRecord record = GameRecord.of(current.setup, current.mrX, current.detectives,
+				history.movesToCurrent());
+		startGame(record, current.config);
+		GameSession rebuilt = session;
+		if (rebuilt != null) {
+			// carry the redo tail, and the cursor, over to the rebuilt game
+			int cursor = history.cursorIndex();
+			for (int i = rebuilt.history.size(); i < history.size(); i++) {
+				rebuilt.history.push(history.allMoves().get(i - 1), history.stateAt(i));
+			}
+			while (rebuilt.history.cursorIndex() > cursor) {
+				rebuilt.history.undo();
+			}
+		}
+	}
+
+	private ModelProperty baseConfig() {
+		GameSession current = session;
+		return current == null ? ModelProperty.createDefault(resourceManager) : current.config;
+	}
+
+	private void alert(AlertType type, String header, String content) {
+		Alert alert = new Alert(type, content);
+		alert.setHeaderText(header);
+		alert.initOwner(getStage());
+		alert.show();
 	}
 
 }
