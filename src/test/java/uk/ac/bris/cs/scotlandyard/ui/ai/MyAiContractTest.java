@@ -148,17 +148,25 @@ public class MyAiContractTest {
 
 	@Test
 	public void everyMoveOverManyPositionsIsLegal() throws IOException {
-		MyAi ai = new MyAi();
-		ai.onStart();
-		Board.GameState state = freshGame();
 		Pair<Long, TimeUnit> budget = timeout(150L, TimeUnit.MILLISECONDS);
 
+		// Play whole games until enough positions have been seen, rather than leaning on
+		// any single game running long. A game can end in a handful of moves once the
+		// detectives close in, and asserting that one game is long enough made this test
+		// fail at random as the AI got better at catching Mr X.
 		int positions = 0;
-		while (positions < 24 && state.getWinner().isEmpty()) {
-			state = playOne(ai, state, budget);
-			positions++;
+		int games = 0;
+		while (positions < 24 && games < 8) {
+			MyAi ai = new MyAi();
+			ai.onStart();
+			Board.GameState state = freshGame();
+			while (state.getWinner().isEmpty()) {
+				state = playOne(ai, state, budget); // asserts legality of every move
+				positions++;
+			}
+			ai.onTerminate();
+			games++;
 		}
-		ai.onTerminate();
 
 		assertThat(positions)
 				.as("sweep should have exercised a decent number of positions")
