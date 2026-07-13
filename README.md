@@ -68,11 +68,15 @@ src/main/java/uk/ac/bris/cs/scotlandyard/
   model/          game logic. MyGameStateFactory and MyModelFactory are the implementation,
                   the rest (Board, Move, Player, ScotlandYard, Ai) is framework
   ui/             JavaFX views and controllers
-  ui/ai/          the AI player
+  ui/ai/          the AI players
+  ui/ai/arena/    headless AI-vs-AI batches
+  ui/privacy/     the QR private move channel
+  persistence/    save, load, replay, undo
 src/main/resources/
   graph.txt       the 199-station map, 467 edges
+  tiny-graph.txt  a 20-station map, for fast sweeps and exact endgame tests
   pos.txt         station coordinates for the board image
-src/test/         85 tests. AllTest is the suite the build runs
+src/test/         199 tests
 ```
 
 ## AI players
@@ -125,8 +129,57 @@ incumbent move once it has finished, so the search is always safe to interrupt. 
 are modelled greedily rather than branched, because every detective moving in every
 combination explodes the tree, and depth buys more than an exact reply does.
 
+## The arena
+
+Win rates settle arguments that opinions cannot. The arena plays AI against AI headlessly,
+in parallel, from reproducible seeds.
+
+```bash
+./mvnw compile                      # exec:java does not recompile
+./mvnw exec:java@arena -Dexec.args="--games=100 --mrx=MyAi --detectives=RandomAi"
+```
+
+It records more than who won: the round of every secret and double Mr X spends, the round he
+was caught, and the size and entropy of the detectives' belief at the end. That is what
+distinguishes a change that worked from a change that got lucky. When the ticket gates went
+in, the win rate barely moved, but the histogram showed secret spends jumping off rounds 1 to
+3 and onto 4, 9, 14 and 19, immediately after each reveal. The mechanism was doing what it was
+built to do even where the scoreboard was ambivalent.
+
+Current standings, 100 games each at a 300ms budget:
+
+| Mr X | Detectives | Mr X wins | Rounds survived |
+|---|---|---|---|
+| MyAi | RandomAi | 77% | 18.0 |
+| RandomAi | MyAi | 0% | 6.9 |
+| MyAi | MyAi | 20% | 11.8 |
+
+## Other things it does
+
+Three board overlays, from the View menu. **Suspicion** paints every station Mr X could be
+standing on, inferred from the public travel log alone, shaded by likelihood. It reads the
+board, never the AI, so it works when a human is playing Mr X. **Ambiguity** shades each
+station by how many others it reaches in two moves, which is where Mr X most wants to be.
+**Explain AI** shows the moves the AI considered and what it thought of them.
+
+**Save, load, replay and undo** are one feature. The model is immutable and `advance()` is a
+fold, so a game is fully described by its setup, its opening players and its move list. Load
+is the fold. Replay is the fold with a delay. Undo is the fold, one ply shorter.
+
+**Private Mr X moves.** Hot seat means Mr X's move is not really secret, because everyone is
+looking at the same screen. A QR code carries a shuffled letter-to-destination table to his
+phone and the screen shows only letters.
+
 ## Known gaps
 
-The AI compiles, is discovered by the game, and plays. It has no tests of its own, and the
-ticket budget in `Distances.ticketAwareDistance` is an approximation, documented in the
+Mr X is the weak half. He beats a random opponent comfortably but loses the mirror match 4 to
+1, and he survives fewer rounds against himself than the much simpler `GreedyAi` does. Making
+his search model the detectives as chasing his *inferred* position rather than his real one
+was supposed to fix that; it helped a little and did not fix it. Finding out why is the next
+job, and it is a question for the arena rather than for another round of constant-tuning.
+
+Hot-seat still leaks Mr X's current position: the board reveals his counter on his own turn,
+so the QR channel hides where he is going but not where he is.
+
+The ticket budget in `Distances.ticketAwareDistance` is an approximation, said plainly in the
 Javadoc rather than papered over.
