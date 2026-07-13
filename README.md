@@ -4,7 +4,11 @@ A Java implementation of the Scotland Yard board game, played on the real 199-st
 London map. Five detectives hunt Mr X across the city; Mr X moves in secret, surfacing
 only on the reveal rounds.
 
-![Scotland Yard](https://github.com/user-attachments/assets/590211c7-c7bd-437d-9acf-a6c667a2e43f)
+![Scotland Yard](docs/screenshot.png)
+
+*Round 1. Mr X is about to move, and every station he can legally reach is ringed — 96 of
+them, once double moves are counted. The detectives can see the same board you can; what
+they cannot see is which of those he takes.*
 
 ## Running it
 
