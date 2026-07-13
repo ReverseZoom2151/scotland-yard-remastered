@@ -1,5 +1,6 @@
 package uk.ac.bris.cs.scotlandyard.ui.ai;
 
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
@@ -20,8 +21,12 @@ import uk.ac.bris.cs.scotlandyard.model.Move;
  * {@link Board#getAvailableMoves()}, as fatal, so every path through
  * {@link #pickMove} ends in a move taken from that very set. A dumb move played
  * on time beats a clever one that never arrives.
+ *
+ * <p>
+ * It also implements {@link Explains}, so the UI's "Explain AI" overlay can draw the
+ * root moves the search actually weighed up, and what it thought of them.
  */
-public final class MyAi implements Ai {
+public final class MyAi implements Ai, Explains {
 
 	/**
 	 * How much of the allotted time we give back, so the move is returned before the
@@ -58,6 +63,17 @@ public final class MyAi implements Ai {
 	private final EvalWeights weights;
 	private final Random rng;
 
+	/**
+	 * What the last search made of the position, for {@link #lastEvaluation()}.
+	 *
+	 * <p>
+	 * {@link #pickMove} runs on a background executor and the JavaFX thread reads this
+	 * while it does, so it is {@code volatile} and only ever holds an immutable list that
+	 * was finished before it was assigned. Cleared at the top of every {@code pickMove},
+	 * so a fallback move is never explained with the previous turn's reasoning.
+	 */
+	private volatile List<ScoredMove> lastEvaluation = List.of();
+
 	/** Required: the game instantiates AIs reflectively, through the no-arg constructor. */
 	public MyAi() {
 		this(EvalWeights.fromSystemProperties());
@@ -80,6 +96,21 @@ public final class MyAi implements Ai {
 		// No board here, so nothing to precompute yet; see prepare(Board).
 		this.distances = null;
 		this.search = null;
+		this.lastEvaluation = List.of();
+	}
+
+	/**
+	 * @return the root moves the last search weighed up, best first, with higher meaning
+	 *         better <b>for whoever was to move</b> — the detective search's costs are
+	 *         normalised on the way out, so a detective's best move is the highest-scored
+	 *         one, not the lowest. Empty before the first move, and empty whenever the
+	 *         fallback path was taken, since the fallback is not a considered opinion.
+	 *         Never null, never stale, never mutable.
+	 */
+	@Nonnull
+	@Override
+	public List<ScoredMove> lastEvaluation() {
+		return this.lastEvaluation;
 	}
 
 	/** Builds — once — the map distances and the search that leans on them. */
@@ -96,6 +127,8 @@ public final class MyAi implements Ai {
 	@Override
 	public Move pickMove(@Nonnull Board board, Pair<Long, TimeUnit> timeoutPair) {
 		final Move fallback = board.getAvailableMoves().iterator().next();
+		// A stale explanation is worse than none: drop last turn's before anything else.
+		this.lastEvaluation = List.of();
 		try {
 			final long budget = timeoutPair.right().toNanos(timeoutPair.left());
 			final long buffer = Math.min(SAFETY_BUFFER_NANOS, budget / BUFFER_MAX_SHARE);
@@ -110,7 +143,12 @@ public final class MyAi implements Ai {
 					: engine.bestMoveForDetective(board, deadline);
 
 			// The contract is absolute: the move must come from the board's own set.
-			return board.getAvailableMoves().contains(chosen) ? chosen : fallback;
+			if (!board.getAvailableMoves().contains(chosen)) return fallback;
+
+			// Publish only on the path we actually reasoned our way down. The list is
+			// already immutable and complete; the volatile write hands it over whole.
+			this.lastEvaluation = engine.lastRootEvaluation();
+			return chosen;
 		} catch (RuntimeException | StackOverflowError anything) {
 			// A crashed AI is worse than a dumb one, and this is the only place that can
 			// tell the difference.

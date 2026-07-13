@@ -105,6 +105,41 @@ public final class Search {
 	private final EvalWeights weights;
 	private final Random rng;
 
+	/**
+	 * The root moves of the last completed search, best first, for {@link Explains}.
+	 *
+	 * <p>
+	 * <b>Sign convention: higher is always better for the player whose turn it is.</b>
+	 * Mr X's search already maximises his own score, so his root values are exposed as
+	 * they are. The detective search <i>minimises</i> Mr X's score — it ranks moves by a
+	 * cost, low being good — so its costs are negated before they land here. Without that
+	 * normalisation the UI would rank detective moves exactly backwards, which is worse
+	 * than showing nothing at all.
+	 *
+	 * <p>
+	 * Written once per completed root ply and read from the JavaFX thread while the
+	 * search runs on a background executor, so: {@code volatile}, and always an immutable
+	 * list built in full before it is published. A reader therefore sees either the
+	 * previous list or the new one, never a half-built one.
+	 */
+	private volatile List<Explains.ScoredMove> lastRootEvaluation = List.of();
+
+	/**
+	 * @return the root moves scored by the DEEPEST COMPLETED ply of the last search, best
+	 *         first, with higher meaning better <i>for the player who was to move</i>; or
+	 *         an empty list if no search has completed a ply. A ply abandoned on the
+	 *         deadline has scored only an arbitrary subset of the moves and its numbers
+	 *         are not comparable, so it never replaces the last complete one. Immutable,
+	 *         and safe to read from another thread.
+	 */
+	public List<Explains.ScoredMove> lastRootEvaluation() {
+		return this.lastRootEvaluation;
+	}
+
+	/** One finished root ply: the move to play, and every root move it scored. */
+	private record RootPly(Move best, List<Explains.ScoredMove> evaluation) {
+	}
+
 	public Search(Evaluator evaluator, Distances distances) {
 		this(evaluator, distances, EvalWeights.defaults(), new Random());
 	}
@@ -133,6 +168,7 @@ public final class Search {
 	 * @return the best move found by the deepest ply that finished in time
 	 */
 	public Move bestMoveForMrX(Board board, long deadlineNanos) {
+		this.lastRootEvaluation = List.of(); // never hand out a previous turn's opinion
 		final long stopAt = deadlineNanos - SAFETY_MARGIN_NANOS;
 		final ImmutableSet<Move> legal = board.getAvailableMoves();
 		final int mrXLocation = BoardStates.mrXLocationOf(board);
@@ -164,9 +200,13 @@ public final class Search {
 		// moves and its "best so far" is not comparable with anything.
 		for (int depth = 1; depth <= MAX_DEPTH; depth++) {
 			try {
-				final Move candidate =
+				final RootPly ply =
 						rootSearch(board, mrXLocation, rootRound, rootBelief, branch, depth, stopAt);
-				if (candidate != null) best = candidate;
+				if (ply != null) {
+					best = ply.best();
+					// Only a ply that ran to completion has comparable scores for every move.
+					this.lastRootEvaluation = ply.evaluation();
+				}
 			} catch (TimeoutException expired) {
 				break;
 			}
@@ -187,7 +227,7 @@ public final class Search {
 	 * TRADEOFF: perhaps a fifth of a ply of depth, bought back many times over by not
 	 * playing a deterministic, and therefore predictable, Mr X.
 	 */
-	private Move rootSearch(Board board, int mrXLocation, int rootRound,
+	private RootPly rootSearch(Board board, int mrXLocation, int rootRound,
 			Map<Integer, Double> rootBelief, List<Move> branch, int depth, long stopAt) {
 		final GameState root = BoardStates.rebuild(board, mrXLocation);
 		final List<Move> best = new ArrayList<>();
@@ -214,6 +254,9 @@ public final class Search {
 		}
 		if (scored.isEmpty()) return null;
 
+		// O(root moves), and only here: nothing is recorded at interior nodes.
+		final List<Explains.ScoredMove> evaluation = ranked(scored, values);
+
 		// RANDOMISE among near-ties. A deterministic Mr X is a Mr X whose next move an
 		// inference engine can simply compute; and when several moves are within the
 		// noise of each other the search has no opinion worth defending anyway.
@@ -221,8 +264,30 @@ public final class Search {
 		for (int i = 0; i < scored.size(); i++) {
 			if (values.get(i) >= bestValue - band) best.add(scored.get(i));
 		}
-		if (best.isEmpty()) return scored.get(0);
-		return best.get(this.rng.nextInt(best.size()));
+		if (best.isEmpty()) return new RootPly(scored.get(0), evaluation);
+		return new RootPly(best.get(this.rng.nextInt(best.size())), evaluation);
+	}
+
+	/** Pairs moves with their scores, best first. The list handed out is immutable. */
+	private static List<Explains.ScoredMove> ranked(List<Move> moves, List<Integer> scores) {
+		final List<Explains.ScoredMove> evaluation = new ArrayList<>(moves.size());
+		for (int i = 0; i < moves.size(); i++) {
+			evaluation.add(new Explains.ScoredMove(moves.get(i), scores.get(i)));
+		}
+		evaluation.sort(Comparator.comparingInt(Explains.ScoredMove::score).reversed());
+		return List.copyOf(evaluation);
+	}
+
+	/**
+	 * Turns a detective's cost — low is good, and a capture is worth
+	 * {@link Evaluator#MRX_CAPTURED}, which is near {@link Integer#MIN_VALUE} — into a
+	 * score where high is good, saturating rather than overflowing.
+	 */
+	private static int normalisedDetectiveScore(double cost) {
+		final double score = -cost;
+		if (score >= Integer.MAX_VALUE) return Integer.MAX_VALUE;
+		if (score <= Integer.MIN_VALUE) return Integer.MIN_VALUE;
+		return (int) Math.round(score);
 	}
 
 	/** A maximising node: Mr X to move. */
@@ -420,10 +485,9 @@ public final class Search {
 	 * COVERAGE (see {@link EvalWeights#detectiveCoverage()}): scoring every detective
 	 * against the same candidate set makes them all walk towards the same place, and
 	 * five detectives standing on the same station cover one station. So each detective
-	 * is first <i>assigned</i> a distinct high-mass candidate from
-	 * {@link Suspicion#likelihoods(Board)} — greedily, nearest detective to heaviest
-	 * candidate — and pays a premium for closing on the one it owns. They spread, and
-	 * the candidate set collapses from several sides at once.
+	 * is first <i>assigned</i> a target by {@link RouteDiversity}, which solves the
+	 * assignment as weighted set cover, and pays a premium for closing on the one it
+	 * owns. They spread, and the candidate set collapses from several sides at once.
 	 *
 	 * @param board         the current board, on which it is a detective's turn
 	 * @param deadlineNanos when to stop, as a {@link System#nanoTime()} value
@@ -438,6 +502,7 @@ public final class Search {
 		// is hard-killed. Worse, the candidates disagree with each other far more than the
 		// plies disagree with each other: the dominant error is *where Mr X is*, not how
 		// deeply we read the position.
+		this.lastRootEvaluation = List.of(); // never hand out a previous turn's opinion
 		final long stopAt = deadlineNanos - SAFETY_MARGIN_NANOS;
 		final ImmutableSet<Move> legal = board.getAvailableMoves();
 		Move best = legal.iterator().next();
@@ -445,19 +510,35 @@ public final class Search {
 		final List<Integer> candidates = sample(MrXLocator.possibleLocations(board));
 		if (candidates.isEmpty()) return best;
 
+		// RouteDiversity solves the assignment as weighted set cover, scoring a candidate by
+		// the BEST detective watching it rather than the sum. That saturation is what makes
+		// them fan out: a station already covered closely is worth nothing to a second
+		// detective, so the greedy sends it somewhere new. The old assignCoverage summed, so
+		// two detectives near the same heavy candidate both closed on it and the far side of
+		// the belief went unwatched.
 		final Map<Piece, Integer> assignment = this.weights.detectiveCoverage()
-				? assignCoverage(board)
+				? RouteDiversity.assignTargets(board, this.distances)
 				: Map.of();
+
+		// One flat pass, so every move that gets scored is scored the same way and the
+		// scores stay comparable even if the deadline cuts the pass short.
+		final List<Move> scored = new ArrayList<>(legal.size());
+		final List<Integer> values = new ArrayList<>(legal.size());
 
 		double bestCost = Double.POSITIVE_INFINITY;
 		for (Move move : legal) {
 			if (System.nanoTime() > stopAt) break; // keep the incumbent; never overrun
 			final double cost = cost(board, move, candidates, assignment);
+			// NORMALISE: the search minimises cost, but Explains promises that higher is
+			// better for the player to move, so the sign is flipped on the way out.
+			scored.add(move);
+			values.add(normalisedDetectiveScore(cost));
 			if (cost < bestCost) {
 				bestCost = cost;
 				best = move;
 			}
 		}
+		if (!scored.isEmpty()) this.lastRootEvaluation = ranked(scored, values);
 		return best;
 	}
 
@@ -470,34 +551,6 @@ public final class Search {
 	 *
 	 * @return detective piece to the station it should be closing on; possibly partial
 	 */
-	private Map<Piece, Integer> assignCoverage(Board board) {
-		final Map<Integer, Double> belief = Suspicion.likelihoods(board);
-		final List<Map.Entry<Integer, Double>> ranked = new ArrayList<>(belief.entrySet());
-		ranked.sort(Comparator.<Map.Entry<Integer, Double>>comparingDouble(Map.Entry::getValue)
-				.reversed()
-				.thenComparingInt(Map.Entry::getKey));
-
-		final List<Player> detectives = new ArrayList<>(BoardStates.detectivesOf(board));
-		final Map<Piece, Integer> assignment = new HashMap<>();
-		for (Map.Entry<Integer, Double> entry : ranked) {
-			if (detectives.isEmpty()) break;
-			final int candidate = entry.getKey();
-			Player nearest = null;
-			int nearestDistance = Integer.MAX_VALUE;
-			for (Player detective : detectives) {
-				final int distance = this.distances.ticketAwareDistance(
-						board, detective.piece(), detective.location(), candidate);
-				if (nearest == null || distance < nearestDistance) {
-					nearestDistance = distance;
-					nearest = detective;
-				}
-			}
-			assignment.put(nearest.piece(), candidate);
-			detectives.remove(nearest);
-		}
-		return assignment;
-	}
-
 	/**
 	 * The cost of a detective move, averaged over the candidate locations. Low is good
 	 * for the detectives, mirroring {@link Evaluator}'s sign convention.
