@@ -13,6 +13,9 @@
     <properties>
         <runSuite>**/AllTest.class</runSuite>
         <runAiSuite>**/ui/ai/*Test.class</runAiSuite>
+        <runArenaSuite>**/ui/ai/arena/*Test.class</runArenaSuite>
+        <runPersistenceSuite>**/persistence/*Test.class</runPersistenceSuite>
+        <runPrivacySuite>**/ui/privacy/*Test.class</runPrivacySuite>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <skipAfter>0</skipAfter>
         <werror>true</werror>
@@ -79,6 +82,25 @@
             <version>4.7.1</version>
         </dependency>
 
+        <!--saved games and recorded arena results-->
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.10.1</version>
+        </dependency>
+
+        <!--QR codes, so Mr X can take his turn privately on a shared screen-->
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>core</artifactId>
+            <version>3.5.3</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>javase</artifactId>
+            <version>3.5.3</version>
+        </dependency>
+
         <!--dependencies for testing-->
         <dependency>
             <groupId>junit</groupId>
@@ -139,6 +161,9 @@
                     <includes>
                         <include>${runSuite}</include>
                         <include>${runAiSuite}</include>
+                        <include>${runArenaSuite}</include>
+                        <include>${runPersistenceSuite}</include>
+                        <include>${runPrivacySuite}</include>
                     </includes>
                     <trimStackTrace>false</trimStackTrace>
                     <skipAfterFailureCount>${skipAfter}</skipAfterFailureCount>
@@ -152,6 +177,22 @@
                 <configuration>
                     <mainClass>uk.ac.bris.cs.scotlandyard.Main</mainClass>
                 </configuration>
+                <executions>
+                    <!--the game: mvnw exec:java@game -->
+                    <execution>
+                        <id>game</id>
+                        <configuration>
+                            <mainClass>uk.ac.bris.cs.scotlandyard.Main</mainClass>
+                        </configuration>
+                    </execution>
+                    <!--headless AI batches: mvnw exec:java@arena -Dexec.args="[dash][dash]games=200" -->
+                    <execution>
+                        <id>arena</id>
+                        <configuration>
+                            <mainClass>uk.ac.bris.cs.scotlandyard.ui.ai.arena.ArenaMain</mainClass>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
 
             <plugin>
