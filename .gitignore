@@ -121,3 +121,11 @@ fabric.properties
 
 
 !repo/**
+
+# local reference implementations, not part of the build
+/repos/
+
+# IDE project files
+.idea/
+*.iml
+.vscode/
