@@ -10,7 +10,9 @@ import net.kurobako.gesturefx.GesturePane;
 import net.kurobako.gesturefx.GesturePane.FitMode;
 import net.kurobako.gesturefx.GesturePane.ScrollBarPolicy;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,8 +32,13 @@ import io.atlassian.fugue.Unit;
 import javafx.animation.Interpolator;
 import javafx.application.Platform;
 import javafx.fxml.FXML;
+import javafx.geometry.Insets;
 import javafx.geometry.Point2D;
+import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.Parent;
+import javafx.scene.control.CheckBox;
+import javafx.scene.control.Label;
 import javafx.scene.effect.BlendMode;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
@@ -39,13 +46,18 @@ import javafx.scene.input.MouseButton;
 import javafx.scene.layout.Pane;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Circle;
+import javafx.scene.shape.Line;
 import javafx.scene.shape.LineTo;
 import javafx.scene.shape.MoveTo;
 import javafx.scene.shape.Path;
 import javafx.scene.shape.PathElement;
 import javafx.util.Duration;
+import uk.ac.bris.cs.scotlandyard.ui.ai.Distances;
+import uk.ac.bris.cs.scotlandyard.ui.ai.Explains;
+import uk.ac.bris.cs.scotlandyard.ui.ai.Suspicion;
 import uk.ac.bris.cs.fxkit.BindFXML;
 import uk.ac.bris.cs.fxkit.Controller;
 import uk.ac.bris.cs.fxkit.interpolator.DecelerateInterpolator;
@@ -96,6 +108,27 @@ final class MapController implements Controller, GameControl {
 
 	private final Pane mask;
 
+	/**
+	 * Sibling of {@link #mask}, same blend mode, drawn just underneath it. The
+	 * analysis overlays live here rather than in {@code mask} itself because
+	 * {@link #clearMoveHints()} wipes {@code mask} on every move, and the overlays
+	 * outlive a move.
+	 */
+	private final Pane overlay;
+	/** Un-blended layer for text: percentages, scores, the legend keys. */
+	private final Pane annotations;
+	/** Floating toggle box, so the overlays are reachable without touching the View menu. */
+	private final VBox controls;
+	/**
+	 * What {@link #root()} hands out: the gesture pane with the toggle box floating over
+	 * it. Assigned late, and deliberately: {@code Controller.bind} calls {@code root()}
+	 * while loading the FXML and feeds the result to {@code FXMLLoader.setRoot}, which
+	 * throws "Root value already specified" if it is given anything but null. The
+	 * original code got away with this by leaving {@code gesturePane} null at that
+	 * point; this field must stay null there for the same reason.
+	 */
+	private StackPane rootStack;
+
 	private final NotificationController notifications;
 	private final BoardViewProperty view;
 	private final GesturePane gesturePane;
@@ -115,11 +148,27 @@ final class MapController implements Controller, GameControl {
 		StackPane pane = new StackPane(root);
 		shadow.setStyle("-fx-background-color: rgba(0,0, 0, 0.4)");
 
+		overlay = new Pane();
+		overlay.setBlendMode(BlendMode.OVERLAY);
+		overlay.setMouseTransparent(true);
+		shadow.getChildren().add(overlay);
+
 		mask = new Pane();
 		mask.setBlendMode(BlendMode.OVERLAY);
 		shadow.getChildren().add(mask);
 
+		annotations = new Pane();
+		annotations.setMouseTransparent(true);
+		root.getChildren().add(annotations);
+
+		controls = buildControls();
+
 		gesturePane = new GesturePane(pane);
+		// The View menu lives in Game.fxml/BaseGameController, which this feature does not
+		// own, so the overlay switches ride along with the map itself: a box pinned over
+		// the viewport, outside the zoomable content.
+		rootStack = new StackPane(gesturePane, controls);
+		rootStack.setPickOnBounds(false);
 		gesturePane.setScrollBarPolicy(ScrollBarPolicy.NEVER);
 		gesturePane.setClipEnabled(false);
 		gesturePane.setFitMode(FitMode.FIT);
@@ -137,10 +186,47 @@ final class MapController implements Controller, GameControl {
 			}
 		});
 		historyPane.visibleProperty().bind(view.historyProperty());
+
+		// Any toggle flip redraws everything; the overlays are cheap enough that it is
+		// not worth tracking which one changed.
+		final javafx.beans.value.ChangeListener<Boolean> redraw = (o, was, is) -> redrawOverlays();
+		view.suspicionProperty().addListener(redraw);
+		view.ambiguityProperty().addListener(redraw);
+		view.aiExplainProperty().addListener(redraw);
+
 		Image image = manager.getImage(ImageResource.MAP);
 		mapView.setImage(image);
-		lockSize(image.getWidth(), image.getHeight(), root, historyPane, mask);
+		lockSize(image.getWidth(), image.getHeight(), root, historyPane, mask, overlay, annotations);
 		Platform.runLater(() -> gesturePane.zoomTo(0, Point2D.ZERO));
+	}
+
+	/** The floating overlay switchboard, pinned to the top-left of the viewport. */
+	private VBox buildControls() {
+		VBox box = new VBox(4);
+		box.setPadding(new Insets(10));
+		box.setPickOnBounds(false);
+		box.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+		box.setStyle("-fx-background-color: rgba(20,20,26,0.72); -fx-background-radius: 6;");
+		box.getChildren().add(styled(new Label("Overlays")));
+		box.getChildren().add(toggle("Suspicion (where is Mr X?)", view.suspicionProperty()));
+		box.getChildren().add(toggle("Ambiguity (2-hop reach)", view.ambiguityProperty()));
+		box.getChildren().add(toggle("AI explain", view.aiExplainProperty()));
+		StackPane.setAlignment(box, Pos.TOP_LEFT);
+		StackPane.setMargin(box, new Insets(12));
+		return box;
+	}
+
+	private static Label styled(Label label) {
+		label.setStyle("-fx-text-fill: white; -fx-font-weight: bold;");
+		return label;
+	}
+
+	private static CheckBox toggle(String text, javafx.beans.property.BooleanProperty property) {
+		CheckBox box = new CheckBox(text);
+		box.setStyle("-fx-text-fill: white;");
+		box.setSelected(property.get());
+		box.selectedProperty().bindBidirectional(property);
+		return box;
 	}
 
 	private static void lockSize(double width, double height, Region... regions) {
@@ -307,13 +393,20 @@ final class MapController implements Controller, GameControl {
 
 		final Runnable terminateAction;
 		if (mrX && mrXAi.isDefined()) {
+			overlayAi = mrXAi;
 			terminateAction = requestAi(board, mrXAi.get());
 		} else if (!mrX && detectiveAi.isDefined()) {
+			overlayAi = detectiveAi;
 			terminateAction = requestAi(board, detectiveAi.get());
 		} else {
+			overlayAi = none();
 			terminateAction = requestHuman(
 					board.getCurrentBoard().getAvailableMoves(), m -> selectAndMove(model, m));
 		}
+
+		// The overlays describe the board as it now stands, whoever is to move.
+		overlayBoard = board.getCurrentBoard();
+		redrawOverlays();
 
 		notifications.show("notify_timeout",
 				new NotificationBuilder(
@@ -403,6 +496,175 @@ final class MapController implements Controller, GameControl {
 		}
 	}
 
+	// ---------------------------------------------------------------- overlays
+
+	/** The board the overlays currently describe; null before the first turn. */
+	private Board overlayBoard;
+	/** The Ai to interrogate for an explanation, if the current turn belongs to one. */
+	private Option<Ai> overlayAi = none();
+	/** Map-static, so computed once per JVM and shared by every game. */
+	private static Map<Integer, Integer> ambiguityCache;
+
+	private void redrawOverlays() {
+		overlay.getChildren().clear();
+		annotations.getChildren().clear();
+		legendSlot = 0;
+		if (overlayBoard == null) return;
+		// Ambiguity first, so the suspicion heat sits on top of it.
+		if (view.ambiguityProperty().get()) drawAmbiguity(overlayBoard);
+		if (view.suspicionProperty().get()) drawSuspicion(overlayBoard);
+		if (view.aiExplainProperty().get()) drawAiExplanation();
+	}
+
+	/**
+	 * The heatmap of where Mr X could be. Computed from the public travel log alone
+	 * (see {@link Suspicion}) — never by asking an Ai — so it is just as correct when
+	 * Mr X is a human.
+	 */
+	private void drawSuspicion(Board board) {
+		Map<Integer, Double> likelihoods = Suspicion.likelihoods(board);
+		double peak = likelihoods.values().stream().mapToDouble(Double::doubleValue).max().orElse(0d);
+		if (peak <= 0) return;
+
+		for (Map.Entry<Integer, Double> entry : likelihoods.entrySet()) {
+			double relative = entry.getValue() / peak;
+			Circle circle = nodeCircle(entry.getKey(), Color.web("#ff2d55"));
+			// Floor the opacity so a long-tail candidate is still visible at all; the peak
+			// is opaque, and the ramp between is proportional to likelihood.
+			circle.setOpacity(0.18 + 0.82 * relative);
+			overlay.getChildren().add(circle);
+
+			if (relative > 0.999) {
+				// The strongest candidate gets a ring and its odds spelled out, so the
+				// heatmap always has a readable "best guess" even when it is nearly flat.
+				Circle ring = new Circle(ScotlandYard.MAP_NODE_SIZE * 1.6);
+				ring.setFill(Color.TRANSPARENT);
+				ring.setStroke(Color.WHITE);
+				ring.setStrokeWidth(4);
+				place(ring, entry.getKey());
+				annotations.getChildren().add(ring);
+				annotations.getChildren().add(
+						label(entry.getKey(), String.format("%.0f%%", entry.getValue() * 100), "#ff2d55"));
+			}
+		}
+		addLegend("Mr X suspicion",
+				likelihoods.size() + " candidate stations, peak " + String.format("%.0f%%", peak * 100));
+	}
+
+	/**
+	 * How many stations lie within two moves — the map's own hiding places. Static, so
+	 * it is precomputed once and cached for the life of the JVM.
+	 */
+	private void drawAmbiguity(Board board) {
+		if (ambiguityCache == null) {
+			ambiguityCache = Suspicion.ambiguity(
+					new Distances(board.getSetup().graph), board.getSetup().graph.nodes());
+		}
+		int max = ambiguityCache.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+		int min = ambiguityCache.values().stream().mapToInt(Integer::intValue).min().orElse(0);
+		if (max <= min) return;
+
+		for (Map.Entry<Integer, Integer> entry : ambiguityCache.entrySet()) {
+			double relative = (entry.getValue() - min) / (double) (max - min);
+			// Cold (few ways out) to hot (many): a hue ramp reads faster than opacity alone.
+			Circle circle = nodeCircle(entry.getKey(), Color.hsb(220 - 220 * relative, 0.85, 1.0));
+			circle.setOpacity(0.25 + 0.55 * relative);
+			overlay.getChildren().add(circle);
+		}
+		addLegend("Ambiguity (2-hop reach)", "blue " + min + " -> red " + max + " stations reachable");
+	}
+
+	/**
+	 * The current Ai's own reasoning, if it has any to offer. Purely opt-in: an Ai that
+	 * does not implement {@link Explains} draws nothing, and {@code Ai} itself is
+	 * untouched.
+	 */
+	private void drawAiExplanation() {
+		if (!overlayAi.isDefined()) return;
+		Ai ai = overlayAi.get();
+		if (!(ai instanceof Explains explains)) return; // the common case: nothing to say
+
+		List<Explains.ScoredMove> evaluation = explains.lastEvaluation();
+		if (evaluation == null || evaluation.isEmpty()) return;
+
+		List<Explains.ScoredMove> top = new ArrayList<>(evaluation);
+		top.sort(Comparator.comparingInt(Explains.ScoredMove::score).reversed());
+		if (top.size() > 5) top = top.subList(0, 5);
+
+		int rank = 0;
+		for (Explains.ScoredMove scored : top) {
+			Move move = scored.move();
+			int destination = move.visit(new FunctionalVisitor<>(m -> m.destination, d -> d.destination2));
+			// Best move brightest, fading down the ranking.
+			double weight = 1.0 - (rank / (double) Math.max(1, top.size()));
+			Color colour = Color.web("#00e5ff");
+
+			Point2D from = manager.coordinateAtNode(move.source());
+			Point2D to = manager.coordinateAtNode(destination);
+			Line line = new Line(from.getX(), from.getY(), to.getX(), to.getY());
+			line.setStroke(colour);
+			line.setStrokeWidth(6 + 8 * weight);
+			line.setOpacity(0.35 + 0.55 * weight);
+			annotations.getChildren().add(line);
+
+			Circle circle = new Circle(ScotlandYard.MAP_NODE_SIZE);
+			circle.setFill(colour);
+			circle.setOpacity(0.4 + 0.5 * weight);
+			place(circle, destination);
+			annotations.getChildren().add(circle);
+
+			annotations.getChildren().add(
+					label(destination, "#" + (rank + 1) + " " + scored.score(), "#00e5ff"));
+			rank++;
+		}
+		addLegend("AI explain (" + ai.name() + ")", "top " + top.size() + " moves considered, best first");
+	}
+
+	private Circle nodeCircle(int location, Color colour) {
+		Circle circle = new Circle(ScotlandYard.MAP_NODE_SIZE * 1.2);
+		circle.setFill(colour);
+		place(circle, location);
+		circle.setStyle("-fx-effect: dropshadow(two-pass-box, " + toWeb(colour) + ", "
+				+ ScotlandYard.MAP_NODE_SIZE * 4 + ", 0.4, 0, 0)");
+		return circle;
+	}
+
+	private static String toWeb(Color colour) {
+		return String.format("#%02X%02X%02X",
+				(int) Math.round(colour.getRed() * 255),
+				(int) Math.round(colour.getGreen() * 255),
+				(int) Math.round(colour.getBlue() * 255));
+	}
+
+	private void place(Node node, int location) {
+		Point2D point = manager.coordinateAtNode(location);
+		node.setTranslateX(point.getX());
+		node.setTranslateY(point.getY());
+	}
+
+	private Label label(int location, String text, String webColour) {
+		Point2D point = manager.coordinateAtNode(location);
+		Label label = new Label(text);
+		label.setStyle("-fx-background-color: rgba(0,0,0,0.75); -fx-background-radius: 4; "
+				+ "-fx-padding: 2 6 2 6; -fx-font-size: 20; -fx-font-weight: bold; -fx-text-fill: "
+				+ webColour + ";");
+		label.setLayoutX(point.getX() + ScotlandYard.MAP_NODE_SIZE);
+		label.setLayoutY(point.getY() - ScotlandYard.MAP_NODE_SIZE * 2.5);
+		return label;
+	}
+
+	/** Appends one key to the legend stack in the top-right of the map. */
+	private void addLegend(String title, String detail) {
+		Label label = new Label(title + "  —  " + detail);
+		label.setStyle("-fx-background-color: rgba(20,20,26,0.8); -fx-background-radius: 6; "
+				+ "-fx-padding: 6 12 6 12; -fx-font-size: 22; -fx-text-fill: white;");
+		label.setLayoutX(40);
+		label.setLayoutY(40 + 50 * legendSlot++);
+		annotations.getChildren().add(label);
+	}
+
+	private int legendSlot;
+
 	private void clearMoveHints() {
 		hints.values().forEach(MoveHintController::discard);
 		hints.clear();
@@ -436,7 +698,7 @@ final class MapController implements Controller, GameControl {
 
 	@Override
 	public Parent root() {
-		return gesturePane;
+		return rootStack;
 	}
 
 	void resetViewport() {
