@@ -5,12 +5,14 @@ import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
 import uk.ac.bris.cs.scotlandyard.model.Ai;
+import uk.ac.bris.cs.scotlandyard.ui.ai.EvalWeights;
 import uk.ac.bris.cs.scotlandyard.ui.ai.GreedyAi;
 import uk.ac.bris.cs.scotlandyard.ui.ai.MyAi;
 import uk.ac.bris.cs.scotlandyard.ui.ai.RandomAi;
@@ -53,6 +55,11 @@ public final class ArenaMain {
 		final String detectiveName = options.getOrDefault("detectives", "MyAi");
 		final String csv = options.get("csv");
 
+		if (options.containsKey("sweep")) {
+			sweep(options, games, budget, seed, detectiveName);
+			return;
+		}
+
 		final Supplier<Ai> mrX = resolve(mrXName);
 		final Supplier<Ai> detectives = resolve(detectiveName);
 
@@ -68,6 +75,116 @@ public final class ArenaMain {
 		System.out.printf("wall clock            %d s%n", elapsedSeconds);
 
 		if (csv != null) write(Path.of(csv), results);
+	}
+
+	/**
+	 * The ablation sweep:
+	 *
+	 * <pre>
+	 * mvnw exec:java@arena -Dexec.args="--sweep=mrx --games=30 --detectives=GreedyAi"
+	 * </pre>
+	 *
+	 * <p>
+	 * Every variant plays the <i>same</i> games — same seed, same openings — against the
+	 * <i>same</i> fixed opponent, and each one differs from the baseline in exactly one
+	 * knob. That is what makes the resulting table an ablation rather than a leaderboard:
+	 * a row that drops tells you the knob it turned off was doing work, and a row that
+	 * does not tells you the knob was decoration.
+	 *
+	 * @param side {@code --sweep=mrx} sweeps Mr X's weights; anything else sweeps the
+	 *             detectives'
+	 */
+	private static void sweep(Map<String, String> options, int games, long budget, long seed,
+			String opponentName) throws IOException {
+		final String side = options.getOrDefault("sweep", "mrx");
+		final boolean variantIsMrX = !"detectives".equalsIgnoreCase(side);
+		final Supplier<Ai> opponent = resolve(opponentName);
+
+		System.out.printf("Scotland Yard arena sweep: %s weights vs a fixed %s%n",
+				variantIsMrX ? "Mr X" : "detective", opponentName);
+		System.out.printf("games=%d per variant, budget=%dms seed=%d%n%n", games, budget, seed);
+
+		final long began = System.nanoTime();
+		final List<Arena.SweepRow> rows =
+				Arena.sweep(variants(), opponent, variantIsMrX, games, seed, budget);
+		final long elapsedSeconds = (System.nanoTime() - began) / 1_000_000_000L;
+
+		System.out.println(Arena.sweepTable(rows, variantIsMrX));
+		System.out.printf("wall clock            %d s%n", elapsedSeconds);
+	}
+
+	/**
+	 * The baseline and its one-knob ablations. Bound directly to
+	 * {@link EvalWeights} — the weight vector really is the thing being varied, not a
+	 * proxy for it.
+	 */
+	private static List<Arena.Variant> variants() {
+		final EvalWeights base = EvalWeights.defaults();
+		final List<Arena.Variant> variants = new ArrayList<>();
+		variants.add(variant("baseline", base));
+		variants.add(variant("no-belief", withEntropyAlpha(base, 0)));
+		variants.add(variant("no-gates", withGateMoves(base, false)));
+		variants.add(variant("no-beliefSearch", withBeliefSearch(base, false)));
+		variants.add(variant("hump-prior", withHumpPrior(base, true)));
+		variants.add(variant("no-coverage", withCoverage(base, false)));
+		variants.add(variant("freedom-off", withFreedomWeight(base, 0)));
+		variants.add(variant("cap-6", withDistanceCap(base, 6)));
+		return variants;
+	}
+
+	private static Arena.Variant variant(String name, EvalWeights weights) {
+		return new Arena.Variant(name, Arena.weighted(weights));
+	}
+
+	// EvalWeights is a record with twelve components and no wither methods; these keep the
+	// variant list above readable, and are the only place the component order is spelled out.
+	private static EvalWeights withEntropyAlpha(EvalWeights w, double entropyAlpha) {
+		return new EvalWeights(w.nearestWeight(), w.restWeight(), w.distanceCap(),
+				w.useHumpPrior(), w.freedomWeight(), w.freedomCap(), w.revealFreedomBoost(),
+				entropyAlpha, w.beliefSearch(), w.gateMoves(), w.rootTieBand(),
+				w.detectiveCoverage());
+	}
+
+	private static EvalWeights withGateMoves(EvalWeights w, boolean gateMoves) {
+		return new EvalWeights(w.nearestWeight(), w.restWeight(), w.distanceCap(),
+				w.useHumpPrior(), w.freedomWeight(), w.freedomCap(), w.revealFreedomBoost(),
+				w.entropyAlpha(), w.beliefSearch(), gateMoves, w.rootTieBand(),
+				w.detectiveCoverage());
+	}
+
+	private static EvalWeights withBeliefSearch(EvalWeights w, boolean beliefSearch) {
+		return new EvalWeights(w.nearestWeight(), w.restWeight(), w.distanceCap(),
+				w.useHumpPrior(), w.freedomWeight(), w.freedomCap(), w.revealFreedomBoost(),
+				w.entropyAlpha(), beliefSearch, w.gateMoves(), w.rootTieBand(),
+				w.detectiveCoverage());
+	}
+
+	private static EvalWeights withHumpPrior(EvalWeights w, boolean useHumpPrior) {
+		return new EvalWeights(w.nearestWeight(), w.restWeight(), w.distanceCap(),
+				useHumpPrior, w.freedomWeight(), w.freedomCap(), w.revealFreedomBoost(),
+				w.entropyAlpha(), w.beliefSearch(), w.gateMoves(), w.rootTieBand(),
+				w.detectiveCoverage());
+	}
+
+	private static EvalWeights withCoverage(EvalWeights w, boolean detectiveCoverage) {
+		return new EvalWeights(w.nearestWeight(), w.restWeight(), w.distanceCap(),
+				w.useHumpPrior(), w.freedomWeight(), w.freedomCap(), w.revealFreedomBoost(),
+				w.entropyAlpha(), w.beliefSearch(), w.gateMoves(), w.rootTieBand(),
+				detectiveCoverage);
+	}
+
+	private static EvalWeights withFreedomWeight(EvalWeights w, double freedomWeight) {
+		return new EvalWeights(w.nearestWeight(), w.restWeight(), w.distanceCap(),
+				w.useHumpPrior(), freedomWeight, w.freedomCap(), w.revealFreedomBoost(),
+				w.entropyAlpha(), w.beliefSearch(), w.gateMoves(), w.rootTieBand(),
+				w.detectiveCoverage());
+	}
+
+	private static EvalWeights withDistanceCap(EvalWeights w, int distanceCap) {
+		return new EvalWeights(w.nearestWeight(), w.restWeight(), distanceCap,
+				w.useHumpPrior(), w.freedomWeight(), w.freedomCap(), w.revealFreedomBoost(),
+				w.entropyAlpha(), w.beliefSearch(), w.gateMoves(), w.rootTieBand(),
+				w.detectiveCoverage());
 	}
 
 	private static void write(Path path, List<GameResult> results) throws IOException {

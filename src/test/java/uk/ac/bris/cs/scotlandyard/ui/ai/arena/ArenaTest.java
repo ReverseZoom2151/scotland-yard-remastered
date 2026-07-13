@@ -1,6 +1,7 @@
 package uk.ac.bris.cs.scotlandyard.ui.ai.arena;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 
 import java.io.IOException;
 import java.util.List;
@@ -63,7 +64,80 @@ public class ArenaTest {
 		assertThat(result.mrXStart()).isEqualTo(MRX_START);
 		assertThat(result.detectiveStarts()).isEqualTo(DETECTIVE_STARTS);
 		assertThat(result.toCsvRow()).isNotEmpty();
-		assertThat(GameResult.csvHeader().split(",")).hasSize(7);
+		assertThat(GameResult.csvHeader().split(",")).hasSize(13);
+		assertThat(result.toCsvRow().split(",", -1)).hasSize(13);
+	}
+
+	/**
+	 * The telemetry is the apparatus that tells a change that worked from a change that
+	 * got lucky, so it has to be true of the game that was actually played: rounds within
+	 * the log, a real final station, a candidate set that contains it, an entropy in range.
+	 */
+	@Test(timeout = 60_000)
+	public void recordsTheTelemetryTheMechanismClaimsAreJudgedOn() throws IOException {
+		final GameResult result = new Arena(random(), random(), BUDGET_MILLIS)
+				.playOne(Arena.standardSetup(), MRX_START, DETECTIVE_STARTS);
+
+		assertThat(result.mrXFinalLocation()).isPositive();
+		assertThat(result.candidateSetSizeAtEnd()).isPositive();
+		assertThat(result.beliefEntropyAtEnd()).isBetween(0.0, 1.0);
+
+		// Every recorded spend belongs to a round that was actually played.
+		assertThat(result.secretSpentRounds())
+				.allSatisfy(round -> assertThat(round).isBetween(1, result.travelLogSize()));
+		assertThat(result.doubleSpentRounds())
+				.allSatisfy(round -> assertThat(round).isBetween(1, result.travelLogSize()));
+
+		// RandomAi spends at most the tickets it was dealt.
+		assertThat(result.secretSpentRounds().size()).isLessThanOrEqualTo(
+				ScotlandYard.defaultMrXTickets().get(ScotlandYard.Ticket.SECRET));
+		assertThat(result.doubleSpentRounds().size()).isLessThanOrEqualTo(
+				ScotlandYard.defaultMrXTickets().get(ScotlandYard.Ticket.DOUBLE));
+
+		if (result.winner() == GameResult.Winner.MRX) {
+			assertThat(result.capturedAtRound()).isEqualTo(-1);
+		} else {
+			assertThat(result.capturedAtRound()).isIn(-1, result.travelLogSize());
+		}
+	}
+
+	/** A belief that has collapsed to one station is zero entropy; ignorance is not. */
+	@Test(timeout = 10_000)
+	public void entropyIsZeroWhenMrXIsPinnedAndRisesWithDoubt() {
+		assertThat(Arena.normalisedEntropy(java.util.Map.of(42, 1.0), 199)).isZero();
+
+		final double spread = Arena.normalisedEntropy(
+				java.util.Map.of(1, 0.25, 2, 0.25, 3, 0.25, 4, 0.25), 199);
+		assertThat(spread).isBetween(0.0, 1.0).isGreaterThan(0.2);
+
+		// Uniform over the whole map is total ignorance: the top of the scale.
+		final java.util.Map<Integer, Double> everywhere = new java.util.LinkedHashMap<>();
+		for (int station = 1; station <= 199; station++) everywhere.put(station, 1.0 / 199);
+		assertThat(Arena.normalisedEntropy(everywhere, 199)).isCloseTo(1.0, within(1e-9));
+	}
+
+	/** A sweep must play every variant the same games, or it measures the openings. */
+	@Test(timeout = 120_000)
+	public void aSweepPlaysEveryVariantTheSameOpeningsAndRanksThem() throws IOException {
+		final List<Arena.Variant> variants = ImmutableList.of(
+				new Arena.Variant("random-a", random()),
+				new Arena.Variant("random-b", random()));
+
+		final List<Arena.SweepRow> rows =
+				Arena.sweep(variants, greedy(), true, 2, 5L, BUDGET_MILLIS);
+
+		assertThat(rows).hasSize(2);
+		for (Arena.SweepRow row : rows) {
+			assertThat(row.results()).hasSize(2);
+			assertThat(row.winRate(true)).isBetween(0.0, 100.0);
+		}
+		// Same seed, same side, same brain: the two rows saw identical openings.
+		assertThat(rows.get(0).results().get(0).mrXStart())
+				.isEqualTo(rows.get(1).results().get(0).mrXStart());
+
+		final String table = Arena.sweepTable(rows, true);
+		assertThat(table).contains("random-a").contains("random-b").contains("win%");
+		assertThat(Arena.sweepTable(ImmutableList.of(), true)).isEqualTo("no variants swept");
 	}
 
 	@Test(timeout = 120_000)
@@ -171,19 +245,37 @@ public class ArenaTest {
 	}
 
 	@Test(timeout = 10_000)
-	public void summaryCountsBothSides() {
+	public void summaryCountsBothSidesAndReportsTheMechanism() {
 		final ImmutableList<Integer> starts = DETECTIVE_STARTS;
 		final List<GameResult> results = ImmutableList.of(
-				new GameResult(GameResult.Winner.MRX, 35, starts, 20, 10, 30, 0),
-				new GameResult(GameResult.Winner.DETECTIVES, 45, starts, 14, 6, 50, 0),
-				new GameResult(GameResult.Winner.DETECTIVES, 51, starts, 8, 3, 90, 1));
+				result(GameResult.Winner.MRX, 20, 10, 0, ImmutableList.of(4, 9),
+						ImmutableList.of(9), -1, 12, 0.6),
+				result(GameResult.Winner.DETECTIVES, 14, 6, 0, ImmutableList.of(4),
+						ImmutableList.of(), 6, 1, 0.0),
+				result(GameResult.Winner.DETECTIVES, 8, 3, 1, ImmutableList.of(),
+						ImmutableList.of(), -1, 3, 0.3));
 
 		final String summary = Arena.summary(results);
 		assertThat(summary)
 				.contains("games                 3")
 				.contains("Mr X wins             1 (33.3%)")
 				.contains("detective wins        2 (66.7%)")
-				.contains("illegal moves         1");
+				.contains("illegal moves         1")
+				// The three secrets went on rounds 4, 4 and 9: mean 5.67, median 4.
+				.contains("secrets spent         3")
+				.contains("mean secret round   5.67")
+				.contains("median secret round 4.00")
+				.contains("secret histogram    4x2 9x1")
+				.contains("mean double round   9.00")
+				.contains("captures              1")
+				.contains("mean capture round  6.00");
 		assertThat(Arena.summary(ImmutableList.of())).isEqualTo("no games played");
+	}
+
+	private static GameResult result(GameResult.Winner winner, int moves, int rounds, int illegal,
+			ImmutableList<Integer> secrets, ImmutableList<Integer> doubles, int capturedAt,
+			int candidates, double entropy) {
+		return new GameResult(winner, 35, DETECTIVE_STARTS, moves, rounds, 30, illegal,
+				secrets, doubles, capturedAt, candidates, entropy, 100);
 	}
 }
